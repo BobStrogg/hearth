@@ -1,0 +1,51 @@
+{
+  "name": "hearth-acp",
+  "version": "0.1.0",
+  "description": "Self-hosted daemon + phone-friendly web UI for ACP (Agent Client Protocol) coding agents",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/main.js",
+    "test": "tsc && node --test test/*.test.mjs",
+    "prepare": "tsc"
+  },
+  "keywords": [
+    "acp",
+    "agent-client-protocol",
+    "claude-code",
+    "grok",
+    "coding-agent",
+    "remote"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "dependencies": {
+    "@agentclientprotocol/sdk": "^1.9.0",
+    "jose": "^6.2.12",
+    "ws": "^8.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "@types/ws": "^8.18.2",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  },
+  "bin": {
+    "hearth": "dist/main.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "dist",
+    "web",
+    "scripts",
+    "README.md",
+    "LICENSE",
+    "docs"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/BobStrogg/hearth.git"
+  }
+}
