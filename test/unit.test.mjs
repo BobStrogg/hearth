@@ -50,3 +50,13 @@ test("scrypt password and cloudflare JWT verification", async () => {
   assert.equal(await a.checkPassword("x", "no"), false);
   srv.close();
 });
+
+test("OS password check sends the password on stdin, never argv", async () => {
+  const { osPasswordOk } = await import("../dist/auth.js");
+  process.env.HEARTH_DSCL = new URL("./fake-dscl.sh", import.meta.url).pathname;
+  assert.equal(await osPasswordOk("alice", 'pa ss"w\\rd', "darwin"), true);
+  assert.equal(await osPasswordOk("alice", "hunter2", "darwin"), false);
+  assert.equal(await osPasswordOk("alice", "x\nauthonly alice y", "darwin"), false);
+  assert.equal(await osPasswordOk("alice", "", "darwin"), false);
+  delete process.env.HEARTH_DSCL;
+});

@@ -1,4 +1,4 @@
-import { execFile, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { createHmac, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import type { IncomingMessage } from "node:http";
@@ -112,16 +112,35 @@ export class Auth {
   }
 }
 
-/** Check the OS account password of the user running the daemon (macOS: dscl; Linux: pamtester). */
-export function osPasswordOk(user: string, pw: string): Promise<boolean> {
+/** Escape a token for dscl's interactive command parser (backslash-escapes whitespace, quotes and backslashes). */
+export function dsclEscape(s: string) { return s.replace(/[\\\s"']/g, (c) => "\\" + c); }
+
+/**
+ * Check the OS account password of the user running the daemon. The password never appears in argv:
+ * macOS runs `dscl .` in interactive mode and writes `authonly <user> <password>` to its stdin;
+ * Linux pipes the password to `pamtester` on stdin. Fails closed on any error output.
+ */
+export function osPasswordOk(user: string, pw: string, platform: string = process.platform): Promise<boolean> {
+  if (/[\r\n\0]/.test(pw) || !pw) return Promise.resolve(false);
   return new Promise((res) => {
-    if (process.platform === "darwin") {
-      execFile("/usr/bin/dscl", [".", "-authonly", user, pw], { timeout: 10000 }, (err) => res(!err));
-    } else if (which("pamtester")) {
-      const c = spawn("pamtester", [process.env.HEARTH_PAM_SERVICE ?? "login", user, "authenticate"], { stdio: ["pipe", "ignore", "ignore"] });
-      c.stdin.end(pw + "\n");
-      c.on("exit", (code) => res(code === 0));
-      c.on("error", () => res(false));
-    } else res(false);
+    let cmd: string, args: string[], input: string;
+    if (platform === "darwin") {
+      cmd = process.env.HEARTH_DSCL ?? "/usr/bin/dscl"; args = ["."];
+      input = `authonly ${dsclEscape(user)} ${dsclEscape(pw)}\nquit\n`;
+    } else if (process.env.HEARTH_PAMTESTER || which("pamtester")) {
+      cmd = process.env.HEARTH_PAMTESTER ?? "pamtester"; args = [process.env.HEARTH_PAM_SERVICE ?? "login", user, "authenticate"]; input = pw + "\n";
+    } else return res(false);
+    const c = spawn(cmd, args, { stdio: ["pipe", "pipe", "pipe"] });
+    let out = "";
+    c.stdout.on("data", (d) => { out += d; }); c.stderr.on("data", (d) => { out += d; });
+    const t = setTimeout(() => { c.kill("SIGKILL"); }, 10000);
+    c.on("error", () => { clearTimeout(t); res(false); });
+    c.on("exit", (code) => {
+      clearTimeout(t);
+      if (code !== 0) return res(false);
+      // dscl reports failures as "DS Error: ... (eDSAuthFailed)" with exit 0 in interactive mode.
+      res(platform === "darwin" ? !/error|fail|invalid|unknown|not found/i.test(out) : true);
+    });
+    c.stdin.end(input);
   });
 }
