@@ -52,7 +52,7 @@ async function showList() {
     h("div", { class: "row" }, h("strong", {}, s.title), h("span", { class: `pill ${s.state}` }, s.pendingPermissions ? "needs you" : s.state)),
     h("div", { class: "meta" }, `${name(s.agentId)} · ${short(s.cwd)} · ${ago(s.lastActivity)}`)));
   $("#view").replaceChildren(
-    h("div", { class: "toolbar" }, h("span", { class: "muted" }, me.user), h("button", { class: "primary", onclick: newSession }, "+ New session")),
+    h("div", { class: "toolbar" }, h("span", { class: "muted" }, me.user), h("div", { class: "row" }, h("button", { onclick: importSessions }, "Import existing"), h("button", { class: "primary", onclick: newSession }, "+ New session"))),
     items.length ? h("ul", { class: "list" }, items) : h("p", { class: "muted center" }, "No sessions yet."));
 }
 
@@ -81,6 +81,42 @@ async function newSession() {
         try { const s = await api("POST", "/api/sessions", { agentId: sel.value, cwd, title: title.value || undefined }); sheet.hidden = true; location.hash = `#/s/${s.id}`; }
         catch (e) { err.textContent = e.message; } } }, "Start"))));
   await browse();
+}
+
+// ---------- import existing agent sessions ----------
+async function importSessions() {
+  const installed = agents.filter((a) => a.installed);
+  const sheet = $("#sheet"); sheet.hidden = false;
+  const sel = h("select", { "aria-label": "Agent" }, installed.map((a) => h("option", { value: a.id }, a.name)));
+  const info = h("p", { class: "muted" }); const list = h("ul", { class: "dirs" }); const err = h("p", { class: "err" });
+  let token = 0;
+  async function load() {
+    const my = ++token;
+    info.textContent = "Asking the agent for its sessions…"; list.replaceChildren(); err.textContent = "";
+    try {
+      const r = await api("GET", `/api/agents/${encodeURIComponent(sel.value)}/sessions`);
+      if (my !== token) return; // a newer request (agent changed) wins
+      if (!r.importable) info.textContent = "This agent can't load or resume its sessions over ACP, so they can't be imported.";
+      else if (r.source === "files") info.textContent = "Listed from the agent's own files (it doesn't support session/list).";
+      else info.textContent = r.canLoad ? "History will be loaded from the agent." : "The agent resumes sessions without replaying history, so earlier messages won't show.";
+      if (r.error && r.source !== "acp") err.textContent = r.error;
+      if (!r.sessions.length) list.append(h("li", { class: "muted" }, "No sessions found."));
+      for (const x of r.sessions) {
+        const btn = x.hearthId ? h("button", { onclick: () => { sheet.hidden = true; location.hash = `#/s/${x.hearthId}`; } }, "Open")
+          : h("button", { class: "primary", disabled: !r.importable || !x.allowed, onclick: async () => {
+              btn.disabled = true; btn.textContent = "Importing…";
+              try { const s = await api("POST", "/api/sessions/import", { agentId: sel.value, agentSessionId: x.sessionId, cwd: x.cwd, title: x.title || undefined }); sheet.hidden = true; location.hash = `#/s/${s.id}`; }
+              catch (e) { err.textContent = e.message; btn.disabled = false; btn.textContent = "Import"; } } }, "Import");
+        list.append(h("li", { class: "ext" }, h("div", { class: "row" }, h("strong", {}, x.title || x.sessionId.slice(0, 12)), btn),
+          h("div", { class: "meta" }, `${short(x.cwd || "?")}${x.updatedAt ? " · " + ago(x.updatedAt) : ""}${x.allowed ? "" : " · outside allowed folders"}`)));
+      }
+    } catch (e) { info.textContent = ""; err.textContent = e.message; }
+  }
+  sel.onchange = load;
+  sheet.replaceChildren(h("div", { class: "sheet-body" }, h("h2", {}, "Import an existing session"),
+    installed.length ? sel : h("p", { class: "err" }, "No ACP agents found on this computer."), info, err, list,
+    h("button", { onclick: () => { sheet.hidden = true; } }, "Close")));
+  if (installed.length) await load();
 }
 
 // ---------- chat ----------
@@ -122,7 +158,8 @@ class Chat {
   }
   onMsg(m) {
     const atBottom = this.log.scrollHeight - this.log.scrollTop - this.log.clientHeight < 80;
-    if (m.type === "replay") { if (this.lastSeq === 0) { this.log.replaceChildren(); this.tools.clear(); this.cur = null; } m.items.forEach((e) => this.entry(e)); }
+    this.stick = atBottom;
+    if (m.type === "replay") { this.replaying = true; if (this.lastSeq === 0) { this.log.replaceChildren(); this.tools.clear(); this.cur = null; } m.items.forEach((e) => this.entry(e)); this.replaying = false; }
     else if (m.type === "entry") this.entry(m.entry);
     else if (m.type === "state") { setHeader(m.title, { back: true, menu: true, status: m.state }); this.status(m.state); this.title = m.title; }
     else if (m.type === "permission") this.addPerm(m);
@@ -145,6 +182,9 @@ class Chat {
       if (ev === "agent_exit") this.note("Agent stopped. Send a message to restart it.");
       else if (ev === "context_reset") this.note("Agent restarted without its memory of the earlier conversation (it doesn't support session/load).");
       else if (ev === "session_loaded") this.note("Agent restarted and reloaded the conversation.");
+      else if (ev === "session_resumed") this.note("Agent restarted and resumed the conversation.");
+      else if (ev === "import_replay_start") this.note("Imported from the agent's own history:");
+      else if (ev === "session_imported") this.note(msg.note ? `Imported. ${msg.note}.` : "Imported. New messages continue the same agent session.");
       else if (ev === "session_load_failed") this.note("Couldn't reload the conversation; started fresh.", "err");
       else if (ev === "permission_answer") this.note(msg.optionId ? `Permission answered: ${msg.optionId}` : "Permission cancelled");
     } else if (e.dir === "in" && msg.error) this.note(`Agent error: ${msg.error.message}`, "err");
@@ -156,12 +196,12 @@ class Chat {
         if (!this.cur || this.cur.role !== role) { this.cur = { role, text: "", el: h("div", { class: `msg ${role} md` }) }; this.log.append(this.cur.el); }
         const c = u.content || {};
         if (c.type === "text") this.cur.text += c.text; else if (c.type === "image") this.cur.text += "\n[image]\n"; else if (c.type === "resource_link") this.cur.text += ` [${c.name || c.uri}]`;
-        this.cur.el.innerHTML = renderMarkdown(this.cur.text);
+        this.paint(this.cur.el, this.cur);
         break;
       }
       case "agent_thought_chunk": {
         if (!this.cur || this.cur.role !== "thought") { const d = h("details", { class: "thought" }, h("summary", {}, "Thinking…"), h("div", { class: "md" })); this.cur = { role: "thought", text: "", el: d }; this.log.append(d); }
-        this.cur.text += u.content?.text ?? ""; this.cur.el.lastChild.innerHTML = renderMarkdown(this.cur.text);
+        this.cur.text += u.content?.text ?? ""; this.paint(this.cur.el.lastChild, this.cur);
         break;
       }
       case "tool_call": case "tool_call_update": {
@@ -181,6 +221,14 @@ class Chat {
       case "current_mode_update": this.note(`Mode: ${u.currentModeId}`); break;
       default: break;
     }
+  }
+  // Progressive rendering: every chunk is appended immediately; markdown is re-rendered at most once per frame.
+  paint(el, cur) {
+    el._cur = cur;
+    if (el._raf) return;
+    const draw = () => { el._raf = 0; el.innerHTML = renderMarkdown(el._cur.text); if (this.stick) this.log.scrollTop = this.log.scrollHeight; };
+    if (document.visibilityState !== "visible" || this.replaying) return draw();
+    el._raf = requestAnimationFrame(draw);
   }
   renderTool(t) {
     const d = t.data; const open = t.el.open;

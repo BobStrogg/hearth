@@ -42,3 +42,4 @@ code { font-family:ui-monospace, Menlo, monospace; font-size:.88em; }
 .perms { display:flex; flex-direction:column; gap:.5rem; padding:0 .8rem; } .perm { border-color:var(--acc); }
 .composer { display:flex; gap:.5rem; padding:.6rem .8rem calc(.6rem + env(safe-area-inset-bottom)); border-top:1px solid var(--line); align-items:flex-end; }
 .composer textarea { flex:1; resize:none; max-height:160px; }
+.dirs li.ext { cursor:default; } .dirs li.ext .meta { color:var(--muted); font-size:.85rem; }

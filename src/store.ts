@@ -13,6 +13,9 @@ export interface SessionMeta {
   agentSessionId?: string; // the agent's own session id (for session/load)
   state: "running" | "idle" | "stopped" | "exited";
   seq: number;             // last transcript seq written
+  /** For imported sessions: false until the agent's own history has been replayed into the transcript once. */
+  seeded?: boolean;
+  importedFrom?: { agentSessionId: string; via: "load" | "resume" | "pending" };
 }
 
 export interface TranscriptEntry {

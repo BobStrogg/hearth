@@ -17,8 +17,14 @@ before(async () => {
   const agentsFile = join(dataDir, "agents.json");
   writeFileSync(agentsFile, JSON.stringify([
     { id: "mock", name: "Mock", detect: [process.execPath], command: process.execPath, args: [MOCK] },
+    { id: "mockfull", name: "Mock full", detect: [process.execPath], command: process.execPath, args: [MOCK], env: { MOCK_LOAD_SESSION: "1", MOCK_LIST: "1", MOCK_RESUME: "1", MOCK_STORE: join(dataDir, "store.json") } },
+    { id: "mockresume", name: "Mock resume", detect: [process.execPath], command: process.execPath, args: [MOCK], env: { MOCK_LIST: "1", MOCK_RESUME: "1", MOCK_STORE: join(dataDir, "store.json") } },
     { id: "mockload", name: "Mock+load", detect: [process.execPath], command: process.execPath, args: [MOCK], env: { MOCK_LOAD_SESSION: "1" } },
   ]));
+  writeFileSync(join(dataDir, "store.json"), JSON.stringify({
+    "cli-1": { cwd: join(root, "proj"), title: "Fix the parser", updatedAt: "2026-10-18T10:00:00Z", history: [{ role: "user", text: "fix the parser" }, { role: "agent", text: "Parser fixed." }] },
+    "cli-2": { cwd: "/etc", title: "Outside roots", updatedAt: "2026-10-18T11:00:00Z", history: [] },
+  }));
   const cfg = configFromEnv({ HEARTH_PORT: "0", HEARTH_DATA_DIR: dataDir, HEARTH_ROOTS: root, HEARTH_AGENTS_FILE: agentsFile,
     HEARTH_IDENTITY: "header:x-user", HEARTH_PASSWORD: hashPassword(PW) });
   h = new Hearth(cfg);
@@ -164,4 +170,70 @@ test("agent restart uses session/load when supported, else resets context", asyn
     s.close();
     await api("alice@example.com", "DELETE", `/api/sessions/${c.json.id}`);
   }
+});
+
+test("import existing agent sessions (list + load seeds transcript; resume-only; unsupported)", async () => {
+  const U = "alice@example.com";
+  const l = (await api(U, "GET", "/api/agents/mockfull/sessions")).json;
+  assert.equal(l.source, "acp"); assert.equal(l.importable, true);
+  assert.deepEqual(l.sessions.map((x) => [x.sessionId, x.allowed]), [["cli-2", false], ["cli-1", true]]);
+  assert.equal((await api(U, "POST", "/api/sessions/import", { agentId: "mockfull", agentSessionId: "cli-2", cwd: "/etc" })).status, 400);
+  const imp = await api(U, "POST", "/api/sessions/import", { agentId: "mockfull", agentSessionId: "cli-1", cwd: join(root, "proj"), title: "Fix the parser" });
+  assert.equal(imp.status, 201); assert.equal(imp.json.importedFrom.via, "load");
+  const s = await ws(U, imp.json.id); const rp = await s.until((m) => m.type === "replay");
+  const ups = rp.items.filter((e) => e.msg?.method === "session/update").map((e) => e.msg.params.update);
+  assert.deepEqual(ups.map((u) => [u.sessionUpdate, u.content.text]), [["user_message_chunk", "fix the parser"], ["agent_message_chunk", "Parser fixed."]]);
+  // continues in the same agent session
+  s.send(JSON.stringify({ type: "prompt", text: "hi" })); await s.until((m) => m.type === "prompt_done");
+  const out = h.store.read(h.live.get(imp.json.id).meta).find((e) => e.dir === "out" && e.msg.method === "session/prompt");
+  assert.equal(out.msg.params.sessionId, "cli-1");
+  // restart after import: history is NOT replayed again
+  h.live.get(imp.json.id).child.kill("SIGKILL"); await s.until((m) => m.type === "state" && m.state === "stopped");
+  s.send(JSON.stringify({ type: "prompt", text: "again" })); await s.until((m) => m.type === "prompt_done" && s.msgs.filter((x) => x.type === "prompt_done").length === 2);
+  const chunks = h.store.read(h.live.get(imp.json.id).meta).filter((e) => e.msg?.params?.update?.content?.text === "Parser fixed.");
+  assert.equal(chunks.length, 1); s.close();
+  // listing marks it as already imported; re-import returns the same Hearth session
+  const l2 = (await api(U, "GET", "/api/agents/mockfull/sessions")).json;
+  assert.equal(l2.sessions.find((x) => x.sessionId === "cli-1").hearthId, imp.json.id);
+  assert.equal((await api(U, "POST", "/api/sessions/import", { agentId: "mockfull", agentSessionId: "cli-1", cwd: join(root, "proj") })).json.id, imp.json.id);
+  // other users don't see the import
+  assert.equal((await api("bob@example.com", "GET", "/api/agents/mockfull/sessions")).json.sessions.find((x) => x.sessionId === "cli-1").hearthId, null);
+  // resume-only agent: imported without history
+  const r2 = await api(U, "POST", "/api/sessions/import", { agentId: "mockresume", agentSessionId: "cli-1", cwd: join(root, "proj") });
+  assert.equal(r2.status, 201); assert.equal(r2.json.importedFrom.via, "resume");
+  // unknown session id fails cleanly and leaves nothing behind
+  const before = (await api(U, "GET", "/api/sessions")).json.length;
+  assert.equal((await api(U, "POST", "/api/sessions/import", { agentId: "mockresume", agentSessionId: "nope", cwd: join(root, "proj") })).status, 502);
+  assert.equal((await api(U, "GET", "/api/sessions")).json.length, before);
+  // agent without list/load/resume
+  const n = (await api(U, "GET", "/api/agents/mock/sessions")).json;
+  assert.equal(n.source, "none"); assert.equal(n.importable, false);
+  for (const x of [imp.json.id, r2.json.id]) await api(U, "DELETE", `/api/sessions/${x}`);
+});
+
+test("terminal: shell lines, relative cwd, args, missing binary, byte limit (Devin-style)", async () => {
+  const U = "alice@example.com";
+  const c = await api(U, "POST", "/api/sessions", { agentId: "mock", cwd: join(root, "proj") });
+  const s = await ws(U, c.json.id); await s.until((m) => m.type === "state" && m.state === "idle");
+  s.send(JSON.stringify({ type: "prompt", text: "shellcmd" })); await s.until((m) => m.type === "prompt_done");
+  const t = text(h.store.read(h.live.get(c.json.id).meta));
+  assert.ok(t.includes(`A="X2\\n${join(root, "proj")}" exit=0`), t);
+  assert.match(t, /status=\{"exitCode":0,"signal":null\}/);
+  assert.match(t, /B=a b-c/); assert.match(t, /C=127/); assert.match(t, /D=100,true/);
+  s.close(); await api(U, "DELETE", `/api/sessions/${c.json.id}`);
+});
+
+test("streaming: message and thought chunks reach the browser before the turn ends", async () => {
+  const U = "alice@example.com";
+  const c = await api(U, "POST", "/api/sessions", { agentId: "mock", cwd: join(root, "proj") });
+  const s = await ws(U, c.json.id); await s.until((m) => m.type === "state" && m.state === "idle");
+  const seen = []; s.on("message", (d) => { const m = JSON.parse(String(d)); const u = m.entry?.msg?.params?.update; if (u) seen.push([u.sessionUpdate, Date.now()]); if (m.type === "prompt_done") seen.push(["done", Date.now()]); });
+  s.send(JSON.stringify({ type: "prompt", text: "stream" }));
+  await s.until((m) => m.type === "prompt_done");
+  const done = seen.find((x) => x[0] === "done")[1];
+  const msg = seen.filter((x) => x[0] === "agent_message_chunk"), th = seen.filter((x) => x[0] === "agent_thought_chunk");
+  assert.ok(msg.length >= 4 && th.length >= 4);
+  assert.ok(done - msg[0][1] >= 400, `first chunk only ${done - msg[0][1]}ms before done`);
+  assert.ok(msg[1][1] - msg[0][1] >= 100, "chunks were batched");
+  s.close(); await api(U, "DELETE", `/api/sessions/${c.json.id}`);
 });

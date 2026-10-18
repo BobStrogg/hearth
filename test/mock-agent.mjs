@@ -3,17 +3,33 @@
 import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
 
+import { readFileSync } from "node:fs";
 const LOAD = process.env.MOCK_LOAD_SESSION === "1";
+const LIST = process.env.MOCK_LIST === "1";
+const RESUME = process.env.MOCK_RESUME === "1";
+// Pre-existing "CLI" sessions: { [id]: { cwd, title, updatedAt, history: [{ role: "user"|"agent", text }] } }
+const STORE = process.env.MOCK_STORE ? JSON.parse(readFileSync(process.env.MOCK_STORE, "utf8")) : {};
 const sessions = new Map();
 let n = 0;
 
 new acp.AgentSideConnection((conn) => ({
   async initialize() {
-    return { protocolVersion: acp.PROTOCOL_VERSION, agentCapabilities: { loadSession: LOAD }, authMethods: [], agentInfo: { name: "mock-agent", version: "1" } };
+    return { protocolVersion: acp.PROTOCOL_VERSION, agentCapabilities: { loadSession: LOAD, sessionCapabilities: { ...(LIST ? { list: {} } : {}), ...(RESUME ? { resume: {} } : {}) } }, authMethods: [], agentInfo: { name: "mock-agent", version: "1" } };
   },
   async newSession({ cwd }) { const id = `mock-${++n}-${process.pid}`; sessions.set(id, { cwd, history: [] }); return { sessionId: id, modes: { currentModeId: "code", availableModes: [{ id: "code", name: "Code" }, { id: "ask", name: "Ask" }] } }; },
+  async listSessions({ cwd }) {
+    return { sessions: Object.entries(STORE).filter(([, v]) => !cwd || v.cwd === cwd).map(([id, v]) => ({ sessionId: id, cwd: v.cwd, title: v.title, updatedAt: v.updatedAt })) };
+  },
+  async resumeSession({ sessionId, cwd }) {
+    if (!STORE[sessionId] && !sessions.has(sessionId)) throw acp.RequestError.resourceNotFound(sessionId);
+    sessions.set(sessionId, { cwd, history: [] }); return {};
+  },
   async loadSession({ sessionId, cwd }) {
     sessions.set(sessionId, { cwd, history: [] });
+    if (STORE[sessionId]) {
+      for (const h of STORE[sessionId].history) await conn.sessionUpdate({ sessionId, update: { sessionUpdate: h.role === "user" ? "user_message_chunk" : "agent_message_chunk", content: { type: "text", text: h.text } } });
+      return {};
+    }
     await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "(replayed history)" } } });
     return {};
   },
@@ -48,6 +64,21 @@ new acp.AgentSideConnection((conn) => ({
       const t = await conn.createTerminal({ sessionId, command: "echo", args: ["term-ok"] });
       const exit = await t.waitForExit(); const out = await t.currentOutput(); await t.release();
       await say(`terminal said ${out.output.trim()} (exit ${exit.exitCode})`);
+    }
+    if (text.includes("stream")) {
+      for (const w of ["one ", "two ", "three ", "four "]) { await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "t" } } }); await say(w); await new Promise((r) => setTimeout(r, 150)); }
+    }
+    if (text.includes("shellcmd")) {
+      // Devin-style: a whole shell line as `command`, no args, relative cwd; plus an args-style call and a missing binary.
+      const a = await conn.createTerminal({ sessionId, command: "echo $((6*7)) | tr 4 X && pwd", cwd: ".", outputByteLimit: 64 });
+      const ea = await a.waitForExit(); const oa = await a.currentOutput(); await a.release();
+      const b = await conn.createTerminal({ sessionId, command: "printf", args: ["%s-%s", "a b", "c"] });
+      await b.waitForExit(); const ob = await b.currentOutput(); await b.release();
+      const c = await conn.createTerminal({ sessionId, command: "definitely-not-a-binary-xyz" });
+      const ec = await c.waitForExit(); await c.release();
+      const d = await conn.createTerminal({ sessionId, command: "yes | head -c 5000", outputByteLimit: 100 });
+      await d.waitForExit(); const od = await d.currentOutput(); await d.release();
+      await say(`A=${JSON.stringify(oa.output.trim())} exit=${ea.exitCode} status=${JSON.stringify(oa.exitStatus)} B=${ob.output} C=${ec.exitCode} D=${od.output.length},${od.truncated}`);
     }
     if (text.includes("slow")) { for (let i = 0; i < 50 && !s.cancelled; i++) await new Promise((r) => setTimeout(r, 100)); if (s.cancelled) return { stopReason: "cancelled" }; }
     for (const w of ["Hello ", "**world**", "!"]) await say(w);

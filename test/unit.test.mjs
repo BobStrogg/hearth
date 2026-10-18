@@ -60,3 +60,21 @@ test("OS password check sends the password on stdin, never argv", async () => {
   assert.equal(await osPasswordOk("alice", "", "darwin"), false);
   delete process.env.HEARTH_DSCL;
 });
+
+test("file fallback lists Claude and Codex sessions read-only", async () => {
+  const { fileFallback } = await import("../dist/importer.js");
+  const { writeFileSync, mkdirSync } = await import("node:fs");
+  const home = mkdtempSync(join(tmpdir(), "fh-"));
+  mkdirSync(join(home, ".claude/projects/-p"), { recursive: true });
+  writeFileSync(join(home, ".claude/projects/-p/abc.jsonl"), JSON.stringify({ type: "user", cwd: "/p", message: { role: "user", content: "hello claude" } }) + "\n");
+  mkdirSync(join(home, ".codex/sessions/2026/10/18"), { recursive: true });
+  writeFileSync(join(home, ".codex/sessions/2026/10/18/rollout-x.jsonl"), [
+    { type: "session_meta", payload: { id: "cx1", cwd: "/q" } },
+    { type: "response_item", payload: { role: "user", content: [{ type: "input_text", text: "<environment_context>..." }] } },
+    { type: "response_item", payload: { role: "user", content: [{ type: "input_text", text: "hello codex" }] } }].map((o) => JSON.stringify(o)).join("\n"));
+  const c = fileFallback("claude", home)[0];
+  assert.deepEqual([c.sessionId, c.cwd, c.title], ["abc", "/p", "hello claude"]);
+  const x = fileFallback("codex", home)[0];
+  assert.deepEqual([x.sessionId, x.cwd, x.title], ["cx1", "/q", "hello codex"]);
+  assert.equal(fileFallback("grok", home), null);
+});

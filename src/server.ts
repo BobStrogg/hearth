@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { WebSocketServer, type WebSocket } from "ws";
 import { type AgentDef, deepProbe, loadAgents, probe } from "./agents.js";
 import { Auth, type AuthConfig } from "./auth.js";
+import { listExternal } from "./importer.js";
 import { LiveSession, within } from "./session.js";
 import { type SessionMeta, Store } from "./store.js";
 
@@ -45,7 +46,7 @@ export class Hearth {
   store: Store; auth: Auth; agents: AgentDef[];
   live = new Map<string, LiveSession>();
   server = createServer((q, s) => { this.http(q, s).catch((e) => this.send(s, 500, { error: String(e?.message ?? e) })); });
-  wss = new WebSocketServer({ noServer: true, maxPayload: 8 * 1024 * 1024 });
+  wss = new WebSocketServer({ noServer: true, maxPayload: 8 * 1024 * 1024, perMessageDeflate: false });
   private deepCache = new Map<string, unknown>();
 
   constructor(readonly cfg: Config) {
@@ -91,7 +92,7 @@ export class Hearth {
   private view(m: SessionMeta) {
     const l = this.live.get(m.id);
     return { id: m.id, title: m.title, agentId: m.agentId, cwd: m.cwd, createdAt: m.createdAt, lastActivity: m.lastActivity,
-      state: l?.meta.state ?? m.state, pendingPermissions: l?.pending.size ?? 0, seq: l?.meta.seq ?? m.seq };
+      state: l?.meta.state ?? m.state, importedFrom: m.importedFrom ?? null, pendingPermissions: l?.pending.size ?? 0, seq: l?.meta.seq ?? m.seq };
   }
 
   private async http(q: IncomingMessage, s: ServerResponse) {
@@ -121,6 +122,36 @@ export class Hearth {
         return this.send(s, 200, r);
       }
       return this.send(s, 200, probe(this.agents).map((p) => ({ ...p, path: undefined, deep: this.deepCache.get(p.id) })));
+    }
+    const em = /^\/api\/agents\/([a-z0-9_.-]+)\/sessions$/.exec(url.pathname);
+    if (em && q.method === "GET") {
+      const a = this.agents.find((x) => x.id === em[1]);
+      if (!a) return this.send(s, 404, { error: "no such agent" });
+      const cwd = url.searchParams.get("cwd") || undefined;
+      if (cwd && !this.cfg.roots.some((r) => within(r, cwd))) return this.send(s, 403, { error: "outside allowed roots" });
+      const r = await listExternal(a, { cwd });
+      const mine = new Map(this.store.list(who).filter((m) => m.agentId === a.id && m.agentSessionId).map((m) => [m.agentSessionId!, m.id]));
+      return this.send(s, 200, { ...r, importable: r.canLoad || r.canResume,
+        sessions: r.sessions.map((x) => ({ ...x, hearthId: mine.get(x.sessionId) ?? null, allowed: !!x.cwd && this.cfg.roots.some((root) => within(root, x.cwd)) })) });
+    }
+    if (url.pathname === "/api/sessions/import" && q.method === "POST") {
+      const b = await this.body(q);
+      const agent = this.agents.find((a) => a.id === b.agentId);
+      const sidExt = String(b.agentSessionId ?? "");
+      if (!agent || !sidExt || sidExt.length > 200) return this.send(s, 400, { error: "agentId and agentSessionId required" });
+      const cwd = resolve(String(b.cwd ?? ""));
+      if (!this.cfg.roots.some((r) => within(r, cwd)) || !statSync(cwd, { throwIfNoEntry: false })?.isDirectory()) return this.send(s, 400, { error: "the session's folder must exist inside the allowed roots" });
+      const existing = this.store.list(who).find((m) => m.agentId === agent.id && m.agentSessionId === sidExt && m.state !== "exited");
+      if (existing) return this.send(s, 200, this.view(existing));
+      const m = this.store.create(who, agent.id, cwd, String(b.title || "Imported session").slice(0, 120));
+      m.agentSessionId = sidExt; m.seeded = false; m.importedFrom = { agentSessionId: sidExt, via: "pending" }; this.store.save(m);
+      const l = this.liveFor(m);
+      try { await l.ensureRunning(); }
+      catch (e) {
+        await l.terminate().catch(() => {}); this.live.delete(m.id); this.store.remove(m);
+        return this.send(s, 502, { error: `import failed: ${String((e as Error)?.message ?? e)}` });
+      }
+      return this.send(s, 201, this.view(m));
     }
     if (url.pathname === "/api/fs") {
       const p = resolve(url.searchParams.get("path") || this.cfg.roots[0]);
@@ -190,7 +221,7 @@ export class Hearth {
 
   private attach(ws: WebSocket, m: SessionMeta, since: number) {
     const l = this.liveFor(m);
-    const send = (o: unknown) => { if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(o)); };
+    const send = (o: unknown) => { if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(o), { compress: false }); };
     // Replay from the transcript first, then go live. Buffer live events during replay to avoid gaps.
     const buffered: unknown[] = []; let replaying = true;
     const listener = (e: unknown) => { if (replaying) buffered.push(e); else send(e); };

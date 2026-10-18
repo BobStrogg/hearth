@@ -10,6 +10,9 @@ Cursor and Devin.
 - **History stays on the machine.** Every ACP message is appended to a per-session JSONL transcript. Clients replay by
   sequence number, so reconnects are lossless even for agents without `session/load`. Agents that support
   `session/load` are reloaded after a restart.
+- **Import existing sessions.** List the sessions an agent already has (from its own CLI) and continue one in Hearth.
+  It uses ACP `session/list`, then `session/load` (which replays the history into Hearth's transcript) or `session/resume`.
+  If `session/list` isn't available, Claude Code and Codex sessions are listed read-only from their local files.
 - **Phone-first chat UI.** Streaming markdown, tool-call cards, diffs, plans, approve/deny buttons for permission requests,
   stop and rename. It also works as a PWA.
 - **Private by design.** It listens on 127.0.0.1 only. Each session belongs to the identity that created it, with no
@@ -97,6 +100,11 @@ All under the daemon origin, scoped to the caller's identity.
 - `GET /api/fs?path=` (folders only, within `HEARTH_ROOTS`)
 - `GET|POST /api/sessions {agentId, cwd, title?}`, `GET|PATCH|DELETE /api/sessions/:id` (`?purge=1` deletes history),
   and `POST /api/sessions/:id/resume`
+- `GET /api/agents/:id/sessions?cwd=`: the agent's own sessions (`source`: `acp`, `files` or `none`; `canLoad`,
+  `canResume`, `importable`; each session has `hearthId` if you've already imported it, and `allowed` if its folder is
+  inside `HEARTH_ROOTS`)
+- `POST /api/sessions/import {agentId, agentSessionId, cwd, title?}`: creates a Hearth session for you bound to that
+  agent session, and seeds the transcript through `session/load`, falling back to `session/resume` with no history
 - `WS /ws?session=<id>&since=<seq>`
   - **Server to client:** `replay {items}`, `entry {entry}`, `state`, `permission {id, params}`,
     `permission_resolved`, `prompt_done {stopReason}`, `error`

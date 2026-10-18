@@ -84,11 +84,12 @@ UNIT
   echo "Tip: 'loginctl enable-linger $USER' keeps Hearth running when you're logged out."
 fi
 
-for i in $(seq 1 20); do
-  if curl -fsS -o /dev/null "http://127.0.0.1:$PORT/"; then
-    echo "Agents found:"; ( set -a; . "$DIR/env"; set +a; "$NODE" "$BIN" probe | grep '✓' ) || true
+# Health check: wait up to ~15s for the daemon to come up (quietly; it takes a moment after launchd starts it).
+for i in $(seq 1 30); do
+  if curl -fs -o /dev/null -m 2 "http://127.0.0.1:$PORT/" 2>/dev/null; then
+    echo "Agents found:"; ( set -a; . "$DIR/env"; set +a; "$NODE" "$BIN" probe | grep '✓' ) || echo "  (none yet)"
     echo "Hearth OK on http://127.0.0.1:$PORT"; exit 0
   fi
   sleep 0.5
 done
-echo "Hearth did not start; see $DIR/hearth.log" >&2; exit 1
+echo "Hearth did not start within 15s; see $DIR/hearth.log" >&2; exit 1
