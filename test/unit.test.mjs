@@ -103,3 +103,26 @@ test("dedupeFanout repairs 2x/3x fan-out turns only", async () => {
   const txt = out.filter((e) => e.dir === "in").map((e) => e.msg.params.update.content.text).join("");
   assert.equal(txt, "Implemented the first complete sliceabbcd");
 });
+
+test("readPage: backward, turn-aligned paging over big JSONL (chunk-spanning lines, torn tail, byte cap)", async () => {
+  const { Store } = await import("../dist/store.js");
+  const { appendFileSync } = await import("node:fs");
+  const st = new Store(mkdtempSync(join(tmpdir(), "hearth-page-")));
+  const m = st.create("u", "a", "/tmp", "t");
+  for (let t = 0; t < 40; t++) {
+    st.append(m, "out", { method: "session/prompt", params: { prompt: [{ type: "text", text: `q${t}` }] } });
+    const n = t % 5 + 1;
+    for (let i = 0; i < n; i++) st.append(m, "in", { method: "session/update", params: { update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: (t === 7 ? "x".repeat(150000) : "") + `a${t}.${i} ` } } } });
+  }
+  appendFileSync(join(st.dir("u", m.id), "transcript.jsonl"), '{"seq":99999,"ts":"x","dir":"in","msg":{"tor'); // torn line being written
+  const all = st.read(m);
+  const pages = []; let before;
+  for (;;) { const p = st.readPage(m, { before, turns: 6 }); pages.push(p); if (!p.hasMore) break; before = p.items[0].seq; }
+  const joined = pages.reverse().flatMap((p) => p.items);
+  assert.deepEqual(joined.map((e) => e.seq), all.map((e) => e.seq));
+  for (const p of pages) assert.equal(p.items[0].msg.method, "session/prompt", "pages start on a turn");
+  assert.equal(pages.at(-1).items.filter((e) => e.msg.method === "session/prompt").length, 6);
+  const capped = st.readPage(m, { turns: 100, maxBytes: 1000 });
+  assert.ok(capped.items.length >= 1 && capped.hasMore);
+  assert.deepEqual(st.readPage(st.create("u", "a", "/tmp", "empty")), { items: [], hasMore: false });
+});

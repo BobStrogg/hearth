@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { appendFileSync, existsSync, readdirSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, fstatSync, openSync, readdirSync, readSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 export interface SessionMeta {
@@ -109,6 +109,52 @@ export class Store {
     const f = join(this.userDir(owner), "..", "prefs.json");
     mkdirSync(join(this.userDir(owner), ".."), { recursive: true, mode: 0o700 });
     writeFileSync(f + ".tmp", JSON.stringify(p, null, 2), { mode: 0o600 }); renameSync(f + ".tmp", f);
+  }
+
+  /** byte offset of the line holding a given seq (filled by readPage), so deeper pages don't rescan the file. */
+  private offsets = new Map<string, number>();
+
+  /**
+   * One page of history, newest first from the end of the file (or from just before `before`), read backwards in
+   * chunks so big transcripts aren't parsed whole. Pages end on a turn boundary (a session/prompt entry) once `turns`
+   * prompts are collected, or stop at `maxBytes`. Returns entries oldest-first.
+   */
+  readPage(m: SessionMeta, opts: { before?: number; turns?: number; maxBytes?: number } = {}): { items: TranscriptEntry[]; hasMore: boolean } {
+    const turns = Math.max(1, opts.turns ?? 8), maxBytes = opts.maxBytes ?? 1_000_000, before = opts.before ?? Infinity;
+    const p = join(this.dir(m.owner, m.id), "transcript.jsonl");
+    if (!existsSync(p)) return { items: [], hasMore: false };
+    const fd = openSync(p, "r");
+    try {
+      let start = fstatSync(fd).size;
+      const cached = Number.isFinite(before) ? this.offsets.get(`${m.id}:${before}`) : undefined;
+      if (cached !== undefined && cached <= start) start = cached;
+      const out: TranscriptEntry[] = []; let bytes = 0; let prompts = 0; let firstOff = start;
+      let tail = Buffer.alloc(0); // bytes [start, start + tail.length) not yet split into lines
+      const take = (line: Buffer, off: number): boolean => { // true = page complete
+        if (!line.length) return false;
+        let e: TranscriptEntry; try { e = JSON.parse(line.toString("utf8")); } catch { return false; } // torn line
+        if (e.seq >= before) return false;
+        out.push(e); bytes += line.length; firstOff = off;
+        const mm = e.msg as { method?: string };
+        return (e.dir === "out" && mm?.method === "session/prompt" && ++prompts >= turns) || bytes >= maxBytes;
+      };
+      scan: while (start > 0) {
+        const n = Math.min(65536, start); start -= n;
+        const b = Buffer.alloc(n); readSync(fd, b, 0, n, start); tail = Buffer.concat([b, tail]);
+        let lineEnd = tail.length;
+        for (let i = tail.length - 1; i >= 0; i--) {
+          if (tail[i] !== 10) continue;
+          if (take(tail.subarray(i + 1, lineEnd), start + i + 1)) break scan;
+          lineEnd = i;
+        }
+        if (start === 0) { take(tail.subarray(0, lineEnd), 0); break; }
+        tail = tail.subarray(0, lineEnd);
+      }
+      out.reverse();
+      if (out.length) this.offsets.set(`${m.id}:${out[0].seq}`, firstOff);
+      if (this.offsets.size > 5000) this.offsets.clear();
+      return { items: out, hasMore: firstOff > 0 && out.length > 0 };
+    } finally { closeSync(fd); }
   }
 
   remove(m: SessionMeta) { rmSync(this.dir(m.owner, m.id), { recursive: true, force: true }); }

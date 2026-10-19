@@ -8,6 +8,7 @@ import { type AgentDef, deepProbe, loadAgents, probe } from "./agents.js";
 import { Auth, type AuthConfig } from "./auth.js";
 import { listExternal } from "./importer.js";
 import { LiveSession, within } from "./session.js";
+const HISTORY_TURNS = 8;
 import { dedupeFanout, type SessionMeta, Store } from "./store.js";
 
 export interface Config extends AuthConfig {
@@ -226,10 +227,12 @@ export class Hearth {
     const buffered: unknown[] = []; let replaying = true;
     const listener = (e: unknown) => { if (replaying) buffered.push(e); else send(e); };
     l.listeners.add(listener);
-    const rawItems = this.store.read(l.meta, since);
+    // Fresh open: only the tail (the client pages older history in on scroll). Reconnect: everything it missed.
+    const page = since > 0 ? { items: this.store.read(l.meta, since), hasMore: false } : this.store.readPage(l.meta, { turns: HISTORY_TURNS });
+    const rawItems = page.items;
     const items = dedupeFanout(rawItems);
     const last = rawItems.at(-1)?.seq ?? since;
-    send({ type: "replay", items, agent: l.meta.agentId, cwd: l.meta.cwd, loadSession: !!l.caps?.agentCapabilities?.loadSession });
+    send({ type: "replay", items, hasMore: page.hasMore, firstSeq: rawItems[0]?.seq ?? null, agent: l.meta.agentId, cwd: l.meta.cwd, loadSession: !!l.caps?.agentCapabilities?.loadSession });
     send({ type: "state", state: l.meta.state, title: l.meta.title });
     send({ type: "settings", options: l.options });
     for (const [pid, p] of l.pending) send({ type: "permission", id: pid, params: p.params });
@@ -239,7 +242,7 @@ export class Hearth {
     const ping = setInterval(() => { if (ws.readyState === ws.OPEN) ws.ping(); }, 25000);
     ws.on("close", () => { clearInterval(ping); l.listeners.delete(listener); });
     ws.on("message", async (raw) => {
-      let msg: { type?: string; content?: unknown; id?: string; optionId?: string | null; text?: string; modeId?: string; configId?: string; value?: unknown };
+      let msg: { type?: string; content?: unknown; id?: string; optionId?: string | null; text?: string; modeId?: string; configId?: string; value?: unknown; before?: unknown };
       try { msg = JSON.parse(String(raw)); } catch { return; }
       try {
         if (msg.type === "prompt") {
@@ -254,6 +257,10 @@ export class Hearth {
           if (o) await l.setOption(o.id, msg.modeId); else if (l.conn) await l.conn.setSessionMode({ sessionId: l.meta.agentSessionId!, modeId: msg.modeId });
         }
         else if (msg.type === "resume") await l.ensureRunning();
+        else if (msg.type === "history" && Number.isInteger(msg.before) && (msg.before as number) > 0) {
+          const pg = this.store.readPage(l.meta, { before: msg.before as number, turns: HISTORY_TURNS });
+          send({ type: "history", before: msg.before, items: dedupeFanout(pg.items), hasMore: pg.hasMore });
+        }
       } catch (e) { send({ type: "error", message: String((e as Error)?.message ?? e) }); }
     });
   }

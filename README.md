@@ -117,9 +117,9 @@ All under the daemon origin, scoped to the caller's identity.
 - `POST /api/sessions/import {agentId, agentSessionId, cwd, title?}`: creates a Hearth session for you bound to that
   agent session, and seeds the transcript through `session/load`, falling back to `session/resume` with no history
 - `WS /ws?session=<id>&since=<seq>`
-  - **Server to client:** `replay {items}`, `entry {entry}`, `state`, `permission {id, params}`,
+  - **Server to client:** `replay {items, hasMore, firstSeq}` (fresh open: the last 8 turns; reconnect with `since`: everything newer), `history {before, items, hasMore}`, `entry {entry}`, `state`, `permission {id, params}`,
     `permission_resolved`, `prompt_done {stopReason}`, `settings {options}`, `error`
-  - **Client to server:** `prompt {content|text}`, `cancel`, `permission {id, optionId|null}`, `setOption {configId, value}`,
+  - **Client to server:** `prompt {content|text}`, `cancel`, `permission {id, optionId|null}`, `setOption {configId, value}`, `history {before: seq}` (the previous 8 turns, read backwards from the end of the file),
     `setMode {modeId}`, `resume`
 
 Pending permission requests are re-sent to every client that connects.

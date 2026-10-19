@@ -123,7 +123,8 @@ async function importSessions() {
 class Chat {
   constructor(id) {
     this.id = id; this.lastSeq = 0; this.tools = new Map(); this.cur = null; this.perms = new Map(); this.retry = 0; this.closed = false;
-    this.log = h("div", { class: "log", role: "log", "aria-live": "polite" });
+    this.log = h("div", { class: "log", role: "log", "aria-live": "polite", onscroll: () => this.maybeOlder() });
+    this.top = h("div", { class: "histtop", hidden: true }); this.firstSeq = null; this.hasMore = false; this.loadingOlder = false;
     this.permBox = h("div", { class: "perms" });
     this.input = h("textarea", { rows: 1, placeholder: "Message the agent…", "aria-label": "Message", oninput: () => this.grow(),
       onkeydown: (e) => { if (e.key === "Enter" && !e.shiftKey && !matchMedia("(pointer: coarse)").matches) { e.preventDefault(); this.send(); } } });
@@ -165,7 +166,13 @@ class Chat {
   onMsg(m) {
     const atBottom = this.log.scrollHeight - this.log.scrollTop - this.log.clientHeight < 80;
     this.stick = atBottom;
-    if (m.type === "replay") { this.replaying = true; if (this.lastSeq === 0) { this.log.replaceChildren(); this.tools.clear(); this.cur = null; } m.items.forEach((e) => this.entry(e)); this.replaying = false; }
+    const initial = m.type === "replay" && this.lastSeq === 0;
+    if (m.type === "replay") {
+      this.replaying = true;
+      if (this.lastSeq === 0) { this.log.replaceChildren(this.top); this.tools.clear(); this.cur = null; this.firstSeq = m.firstSeq ?? m.items[0]?.seq ?? null; this.hasMore = !!m.hasMore; this.loadingOlder = false; this.showTop(); }
+      m.items.forEach((e) => this.entry(e)); this.replaying = false;
+    }
+    else if (m.type === "history") return this.prependOlder(m);
     else if (m.type === "entry") this.entry(m.entry);
     else if (m.type === "state") { setHeader(m.title, { back: true, menu: true, status: m.state }); this.status(m.state); this.title = m.title; }
     else if (m.type === "settings") { this.options = m.options || []; this.renderCtl(); if (!$("#sheet").hidden && this.settingsOpen) this.openSettings(); }
@@ -174,12 +181,47 @@ class Chat {
     else if (m.type === "prompt_done") { this.cur = null; if (m.stopReason !== "end_turn") this.note(`Stopped: ${m.stopReason}`); }
     else if (m.type === "error" && /setting|config|mode|model/i.test(m.message) && this.options.length) { this.renderCtl(); this.note(m.message, "err"); }
     else if (m.type === "error") this.note(/auth/i.test(m.message) ? `${m.message}. Sign in to this agent once on the computer itself (for example run "claude" then /login, or "grok login").` : m.message, "err");
-    if (atBottom || m.type === "replay") this.log.scrollTop = this.log.scrollHeight;
+    if (atBottom || initial) this.log.scrollTop = this.log.scrollHeight;
+    if (initial) this.fillScreen();
+  }
+  // ---- lazy history: older pages load when you scroll near the top, keeping your place ----
+  showTop() {
+    this.top.hidden = this.firstSeq == null;
+    this.top.textContent = this.loadingOlder ? "Loading earlier…" : this.hasMore ? "" : "Beginning of conversation";
+    this.top.className = `histtop${this.loadingOlder ? " loading" : ""}`;
+  }
+  maybeOlder() {
+    if (!this.hasMore || this.loadingOlder || this.firstSeq == null || this.ws?.readyState !== 1) return;
+    if (this.log.scrollTop > Math.max(600, this.log.clientHeight)) return; // start early so momentum scrolling rarely hits the top
+    this.loadingOlder = true; this.showTop();
+    this.ws.send(JSON.stringify({ type: "history", before: this.firstSeq }));
+  }
+  fillScreen() { if (this.hasMore && this.log.scrollHeight <= this.log.clientHeight + 200) this.maybeOlder(); }
+  prependOlder(m) {
+    this.loadingOlder = false;
+    if (m.before !== this.firstSeq) { this.showTop(); return; } // stale answer (e.g. after a full reload)
+    const items = (m.items || []).filter((e) => e.seq < this.firstSeq);
+    // Render the older page into a detached container with its own streaming state, then prepend it.
+    const saved = { log: this.log, cur: this.cur, tools: this.tools, planEl: this.planEl, stick: this.stick };
+    const frag = h("div");
+    this.log = frag; this.cur = null; this.tools = new Map(); this.planEl = null; this.replaying = true; this.stick = false;
+    try { for (const e of items) this.render(e); }
+    finally { Object.assign(this, saved); this.replaying = false; }
+    const log = this.log, beforeH = log.scrollHeight, beforeTop = log.scrollTop;
+    this.top.after(...frag.childNodes);
+    log.scrollTop = beforeTop + (log.scrollHeight - beforeH); // anchor: what you were looking at stays put
+    if (items.length) this.firstSeq = items[0].seq;
+    this.hasMore = !!m.hasMore && items.length > 0; this.showTop();
+    requestAnimationFrame(() => this.fillScreen());
   }
   note(t, cls = "") { this.log.append(h("div", { class: `note ${cls}` }, t)); }
   entry(e) {
     if (e.seq <= this.lastSeq) return; // idempotent: an entry delivered twice (replay overlap, stray socket) is applied once
     this.lastSeq = e.seq;
+    if (this.firstSeq == null) { this.firstSeq = e.seq; this.showTop(); }
+    this.render(e);
+  }
+  render(e) {
     const msg = e.msg || {};
     if (e.dir === "out" && msg.method === "session/prompt") {
       this.cur = null;

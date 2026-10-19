@@ -27,7 +27,7 @@ button:disabled { opacity:.5; }
 .dirs { list-style:none; margin:0; padding:0; max-height:40dvh; overflow:auto; border:1px solid var(--line); border-radius:10px; }
 .dirs li { padding:.65rem .8rem; border-bottom:1px solid var(--line); cursor:pointer; } .dirs li:last-child { border-bottom:0; }
 .chat { display:flex; flex-direction:column; flex:1; min-height:0; }
-.log { flex:1; overflow:auto; padding:.8rem; display:flex; flex-direction:column; gap:.55rem; overscroll-behavior:contain; }
+.log { flex:1; overflow:auto; overflow-anchor:none; -webkit-overflow-scrolling:touch; padding:.8rem; display:flex; flex-direction:column; gap:.55rem; overscroll-behavior:contain; }
 .msg { max-width:92%; padding:.55rem .8rem; border-radius:14px; overflow-wrap:anywhere; }
 .msg.user { align-self:flex-end; background:var(--acc); color:#1b1d21; white-space:pre-wrap; }
 .msg.agent { align-self:flex-start; background:var(--card); border:1px solid var(--line); }
@@ -52,3 +52,4 @@ code { font-family:ui-monospace, Menlo, monospace; font-size:.88em; }
 .toggle { width:1.4rem; height:1.4rem; min-height:0; accent-color:var(--acc); } .small { font-size:.8rem; }
 .composer textarea { flex:1; resize:none; max-height:160px; }
 .dirs li.ext { cursor:default; } .dirs li.ext .meta { color:var(--muted); font-size:.85rem; }
+.histtop { align-self:center; font-size:.75rem; color:var(--muted); padding:.2rem 0 .4rem; min-height:1.4rem; } .histtop.loading { opacity:.8; }

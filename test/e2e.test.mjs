@@ -322,3 +322,32 @@ test("import + resume (Devin-like): no duplicated live stream or history", async
     s.close(); await api(U, "DELETE", `/api/sessions/${imp.json.id}?purge=1`);
   }
 });
+
+test("history paging over WebSocket: tail on open, cursor pages, live entries meanwhile, reconnect unaffected", async () => {
+  const U = "pager@example.com"; await api(U, "POST", "/api/unlock", { password: PW });
+  const c = await api(U, "POST", "/api/sessions", { agentId: "mock", cwd: join(root, "proj") });
+  const l = h.live.get(c.json.id); await l.ensureRunning();
+  for (let t = 0; t < 20; t++) { l.log("out", { method: "session/prompt", params: { prompt: [{ type: "text", text: `q${t}` }] } }); l.log("in", { method: "session/update", params: { update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: `a${t}` } } } }); }
+  const s = await ws(U, c.json.id);
+  const rp = await s.until((m) => m.type === "replay");
+  assert.equal(rp.hasMore, true); assert.equal(rp.items.filter((e) => e.msg?.method === "session/prompt").length, 8);
+  const seen = [...rp.items];
+  s.send(JSON.stringify({ type: "prompt", text: "hi" })); // live stream while paging
+  let before = rp.firstSeq, more = true, n = 0;
+  while (more) {
+    s.send(JSON.stringify({ type: "history", before }));
+    const pg = await s.until((m) => m.type === "history" && m.before === before);
+    assert.ok(pg.items.every((e) => e.seq < before)); seen.unshift(...pg.items);
+    more = pg.hasMore; if (pg.items.length) before = pg.items[0].seq; n++;
+  }
+  await s.until((m) => m.type === "prompt_done");
+  for (const m of s.msgs) if (m.type === "entry") seen.push(m.entry);
+  const seqs = seen.map((e) => e.seq);
+  assert.deepEqual(seqs, [...new Set(seqs)].sort((a, b) => a - b), "no gaps in order, no duplicates");
+  assert.deepEqual(seqs, h.store.read(l.meta).map((e) => e.seq), "everything exactly once");
+  assert.ok(n >= 2);
+  s.close();
+  // reconnect with since gets only what's new, not a tail page
+  const s2 = await ws(U, c.json.id, seqs.at(-3)); const r2 = await s2.until((m) => m.type === "replay");
+  assert.equal(r2.items.length, 2); s2.close();
+});
