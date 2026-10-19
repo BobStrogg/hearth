@@ -220,7 +220,7 @@ test("terminal: shell lines, relative cwd, args, missing binary, byte limit (Dev
   const s = await ws(U, c.json.id); await s.until((m) => m.type === "state" && m.state === "idle");
   s.send(JSON.stringify({ type: "prompt", text: "shellcmd" })); await s.until((m) => m.type === "prompt_done");
   const t = text(h.store.read(h.live.get(c.json.id).meta));
-  assert.ok(t.includes(`A="X2\\n${join(root, "proj")}" exit=0`), t);
+  assert.ok(/A="X2\n[^"]*" exit=0/.test(t) && t.includes(join(root, "proj")), t);
   assert.match(t, /status=\{"exitCode":0,"signal":null\}/);
   assert.match(t, /B=a b-c/); assert.match(t, /C=127/); assert.match(t, /D=100,true/);
   s.close(); await api(U, "DELETE", `/api/sessions/${c.json.id}`);

@@ -1,14 +1,13 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { appendFileSync, existsSync, realpathSync, statSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
-import { createRequire } from "node:module";
-const HEARTH_VERSION: string = (createRequire(import.meta.url)("../package.json") as { version: string }).version;
 import { type AgentDef, searchPath, winShell } from "./agents.js";
 import type { SessionMeta, Store, TranscriptEntry } from "./store.js";
 import { absorb, applyUpdate, MODE_ID, MODEL_ID, normalize, setLocal, valid, type RawSettings, type UiOption } from "./settings.js";
+import { VERSION } from "./version.js";
 
 export type LiveEvent =
   | { type: "entry"; entry: TranscriptEntry }
@@ -65,12 +64,17 @@ export function startTerminal(command: string, args: string[], cwd: string, env:
   return t;
 }
 
-/** True if `p` (resolved) is inside `root`. Follows symlinks for existing paths. */
+/** True if `p` (resolved) is inside `root`. Follows symlinks; for not-yet-created paths, realpaths the longest existing prefix (so /var vs /private/var on macOS still works). */
 export function within(root: string, p: string): boolean {
-  const real = (x: string) => { try { return realpathSync(x); } catch { return resolve(x); } };
-  const r = real(root);
-  let target = resolve(p);
-  try { target = realpathSync(target); } catch { try { target = resolve(realpathSync(dirname(target)), target.split("/").pop()!); } catch { /* new path */ } }
+  const realPrefix = (x: string): string => {
+    let cur = resolve(x), rest: string[] = [];
+    for (;;) {
+      try { return rest.length ? join(realpathSync(cur), ...rest) : realpathSync(cur); }
+      catch { const next = dirname(cur); if (next === cur) return join(cur, ...rest); rest.unshift(basename(cur)); cur = next; }
+    }
+  };
+  const r = realPrefix(root);
+  const target = realPrefix(p);
   const rel = relative(r, target);
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
@@ -202,7 +206,7 @@ export class LiveSession {
     const init = await Promise.race([this.conn.initialize({
       protocolVersion: acp.PROTOCOL_VERSION,
       clientCapabilities: { fs: { readTextFile: true, writeTextFile: true }, terminal: true },
-      clientInfo: { name: "hearth", version: HEARTH_VERSION },
+      clientInfo: { name: "hearth", version: VERSION },
     }), exited]);
     this.caps = init;
     const prior = this.meta.agentSessionId;

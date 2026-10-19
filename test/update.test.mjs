@@ -2,7 +2,7 @@
 import { strict as assert } from "node:assert";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, cpSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, cpSync, rmSync, statSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -35,7 +35,7 @@ test("env file: parse, create with defaults (600), merge explicit values only", 
   let e = parseEnv(readFileSync(f, "utf8"));
   assert.equal(e.HEARTH_ALLOWED_ORIGINS, "https://agents.example.com,http://127.0.0.1:7682,http://localhost:7682");
   assert.equal(e.HEARTH_IDENTITY, "cloudflare"); assert.equal(e.HEARTH_PASSWORD, "off"); assert.equal(e.HEARTH_ROOTS, "/home/u"); assert.equal(e.HEARTH_AUTO_UPDATE, "off");
-  if (process.platform !== "win32") assert.equal(execFileSync("stat", ["-c", "%a", f]).toString().trim(), "600");
+  if (process.platform !== "win32") assert.equal((statSync(f).mode & 0o777).toString(8), "600");
   r = writeEnvFile(f, {}, { identity: "single:" }); assert.equal(r.changed.length, 0, "defaults don't overwrite an existing file");
   r = writeEnvFile(f, { publicOrigin: "https://b.example.com", autoUpdate: "on" });
   e = parseEnv(readFileSync(f, "utf8"));
