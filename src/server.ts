@@ -8,7 +8,7 @@ import { type AgentDef, deepProbe, loadAgents, probe } from "./agents.js";
 import { Auth, type AuthConfig } from "./auth.js";
 import { listExternal } from "./importer.js";
 import { LiveSession, within } from "./session.js";
-import { type SessionMeta, Store } from "./store.js";
+import { dedupeFanout, type SessionMeta, Store } from "./store.js";
 
 export interface Config extends AuthConfig {
   port: number;
@@ -226,8 +226,9 @@ export class Hearth {
     const buffered: unknown[] = []; let replaying = true;
     const listener = (e: unknown) => { if (replaying) buffered.push(e); else send(e); };
     l.listeners.add(listener);
-    const items = this.store.read(l.meta, since);
-    const last = items.at(-1)?.seq ?? since;
+    const rawItems = this.store.read(l.meta, since);
+    const items = dedupeFanout(rawItems);
+    const last = rawItems.at(-1)?.seq ?? since;
     send({ type: "replay", items, agent: l.meta.agentId, cwd: l.meta.cwd, loadSession: !!l.caps?.agentCapabilities?.loadSession });
     send({ type: "state", state: l.meta.state, title: l.meta.title });
     send({ type: "settings", options: l.options });

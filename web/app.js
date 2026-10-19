@@ -136,21 +136,26 @@ class Chat {
     this.connect();
   }
   grow() { this.input.style.height = "auto"; this.input.style.height = Math.min(this.input.scrollHeight, 160) + "px"; }
+  /** Exactly one socket per chat: a dropped-connection retry and a tab-refocus reconnect used to race and leave
+   *  2-3 sockets open, each rendering the same stream (interleaved duplicate text). */
   connect() {
     if (this.closed) return;
+    clearTimeout(this.retryTimer); this.retryTimer = null;
+    if (this.ws && this.ws.readyState <= 1) return; // already connecting/open
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${proto}://${location.host}/ws?session=${this.id}&since=${this.lastSeq}`);
     this.ws = ws;
-    ws.onopen = () => { this.retry = 0; };
-    ws.onmessage = (ev) => this.onMsg(JSON.parse(ev.data));
+    ws.onopen = () => { if (this.ws === ws) this.retry = 0; };
+    ws.onmessage = (ev) => { if (this.ws === ws && !this.closed) this.onMsg(JSON.parse(ev.data)); };
     ws.onclose = (ev) => {
-      if (this.closed) return;
+      if (this.closed || this.ws !== ws) return; // a stale socket closing must not schedule another one
       this.status("offline");
       if (ev.code === 1006 && this.retry > 3) fetch("/api/me").then((r) => r.status === 423 && showLock());
-      setTimeout(() => this.connect(), Math.min(1000 * 2 ** this.retry++, 15000));
+      clearTimeout(this.retryTimer);
+      this.retryTimer = setTimeout(() => this.connect(), Math.min(1000 * 2 ** this.retry++, 15000));
     };
   }
-  close() { this.closed = true; document.removeEventListener("visibilitychange", this.onVis); this.ws?.close(); }
+  close() { this.closed = true; clearTimeout(this.retryTimer); document.removeEventListener("visibilitychange", this.onVis); this.ws?.close(); }
   status(s) { setHeader($("#title").textContent, { back: true, menu: true, status: s }); this.stopBtn.hidden = s !== "running"; }
   send() {
     const text = this.input.value.trim(); if (!text || this.ws?.readyState !== 1) return;
@@ -173,7 +178,8 @@ class Chat {
   }
   note(t, cls = "") { this.log.append(h("div", { class: `note ${cls}` }, t)); }
   entry(e) {
-    this.lastSeq = Math.max(this.lastSeq, e.seq);
+    if (e.seq <= this.lastSeq) return; // idempotent: an entry delivered twice (replay overlap, stray socket) is applied once
+    this.lastSeq = e.seq;
     const msg = e.msg || {};
     if (e.dir === "out" && msg.method === "session/prompt") {
       this.cur = null;

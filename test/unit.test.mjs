@@ -91,3 +91,15 @@ test("settings normalize: configOptions win, group/groupId, unknown types skippe
   assert.equal(applyUpdate({}, { sessionUpdate: "agent_message_chunk" }), null);
   assert.equal(normalize({}).length, 0);
 });
+
+test("dedupeFanout repairs 2x/3x fan-out turns only", async () => {
+  const { dedupeFanout } = await import("../dist/store.js");
+  let seq = 0;
+  const pr = () => ({ seq: ++seq, dir: "out", msg: { method: "session/prompt", params: {} } });
+  const ch = (t) => ({ seq: ++seq, dir: "in", msg: { method: "session/update", params: { sessionId: "s", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: t } } } } });
+  const words = ["Implemented ", "the ", "first ", "complete ", "slice"];
+  const items = [pr(), ...words.flatMap((w) => [ch(w), ch(w), ch(w)]), pr(), ...["a", "b", "b", "c", "d"].map(ch)];
+  const out = dedupeFanout(items);
+  const txt = out.filter((e) => e.dir === "in").map((e) => e.msg.params.update.content.text).join("");
+  assert.equal(txt, "Implemented the first complete sliceabbcd");
+});

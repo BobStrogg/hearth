@@ -113,3 +113,25 @@ export class Store {
 
   remove(m: SessionMeta) { rmSync(this.dir(m.owner, m.id), { recursive: true, force: true }); }
 }
+
+const CHUNK = new Set(["agent_message_chunk", "agent_thought_chunk", "user_message_chunk"]);
+/**
+ * Display-time repair for transcripts written while an agent delivered every update 2-3x (an agent subscribed to the
+ * session twice; fixed in 0.3.1). Within each prompt turn, if *every* chunk appears in runs of exactly k identical
+ * consecutive copies (k = 2 or 3, at least 4 distinct chunks), keep one copy of each. Files on disk are untouched.
+ */
+export function dedupeFanout(items: TranscriptEntry[]): TranscriptEntry[] {
+  const key = (e: TranscriptEntry) => { const m = e.msg as { method?: string; params?: { update?: { sessionUpdate?: string } } }; return m?.method === "session/update" && CHUNK.has(String(m.params?.update?.sessionUpdate)) ? JSON.stringify(m.params) : null; };
+  const drop = new Set<number>();
+  const turns: TranscriptEntry[][] = [[]];
+  for (const e of items) { const m = e.msg as { method?: string }; if (e.dir === "out" && m?.method === "session/prompt") turns.push([]); if (key(e)) turns.at(-1)!.push(e); }
+  for (const t of turns) {
+    for (const k of [3, 2]) {
+      if (t.length < 4 * k || t.length % k) continue;
+      let ok = true;
+      for (let i = 0; i < t.length && ok; i += k) { const a = key(t[i]); for (let j = 1; j < k; j++) if (key(t[i + j]) !== a) ok = false; if (i + k < t.length && key(t[i + k]) === a) ok = false; }
+      if (ok) { for (let i = 0; i < t.length; i += k) for (let j = 1; j < k; j++) drop.add(t[i + j].seq); break; }
+    }
+  }
+  return drop.size ? items.filter((e) => !drop.has(e.seq)) : items;
+}

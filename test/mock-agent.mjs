@@ -11,6 +11,12 @@ const RESUME = process.env.MOCK_RESUME === "1";
 const STORE = process.env.MOCK_STORE ? JSON.parse(readFileSync(process.env.MOCK_STORE, "utf8")) : {};
 const CONFIG = process.env.MOCK_CONFIG === "1";
 const sessions = new Map();
+// Devin-like quirks: every load/resume on this process attaches another subscriber (updates are emitted once per
+// subscriber); MOCK_LOAD_FAIL=1 attaches then fails the load; MOCK_LATE_REPLAY=1 replays history after responding.
+const LOAD_FAIL = process.env.MOCK_LOAD_FAIL === "1", LATE = process.env.MOCK_LATE_REPLAY === "1";
+const subs = new Map();
+const attach = (id) => subs.set(id, (subs.get(id) ?? 0) + 1);
+const fanout = (conn, p) => { const n = Math.max(1, subs.get(p.sessionId) ?? 1); return (async () => { for (let i = 0; i < n; i++) await conn.sessionUpdate(p); })(); };
 const MODELS = [{ group: "fast", name: "Fast", options: [{ value: "m-small", name: "Small" }] }, { group: "smart", name: "Smart", options: [{ value: "m-large", name: "Large", description: "Best" }] }];
 function cfg(s) {
   return [
@@ -47,10 +53,15 @@ new acp.AgentSideConnection((conn) => ({
   },
   async resumeSession({ sessionId, cwd }) {
     if (!STORE[sessionId] && !sessions.has(sessionId)) throw acp.RequestError.resourceNotFound(sessionId);
-    sessions.set(sessionId, fresh(cwd)); return {};
+    sessions.set(sessionId, fresh(cwd)); attach(sessionId); return {};
   },
   async loadSession({ sessionId, cwd }) {
-    sessions.set(sessionId, fresh(cwd));
+    sessions.set(sessionId, fresh(cwd)); attach(sessionId);
+    if (LOAD_FAIL) throw acp.RequestError.internalError({}, "load exploded after attaching");
+    if (LATE && STORE[sessionId]) {
+      setTimeout(async () => { for (const h of STORE[sessionId].history) await conn.sessionUpdate({ sessionId, update: { sessionUpdate: h.role === "user" ? "user_message_chunk" : "agent_message_chunk", content: { type: "text", text: h.text } } }); }, 30);
+      return {};
+    }
     if (STORE[sessionId]) {
       for (const h of STORE[sessionId].history) await conn.sessionUpdate({ sessionId, update: { sessionUpdate: h.role === "user" ? "user_message_chunk" : "agent_message_chunk", content: { type: "text", text: h.text } } });
       return {};
@@ -64,7 +75,7 @@ new acp.AgentSideConnection((conn) => ({
   async prompt({ sessionId, prompt }) {
     const s = sessions.get(sessionId); s.cancelled = false;
     const text = prompt.map((c) => c.text ?? "").join(" ");
-    const say = (t) => conn.sessionUpdate({ sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: t } } });
+    const say = (t) => fanout(conn, { sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: t } } });
     if (text.includes("whoami")) await say(`model=${CONFIG ? s.model : s.legacyModel} mode=${CONFIG ? s.mode : s.legacyMode} effort=${s.effort} web=${s.web} `);
     if (text.includes("pushcfg")) { s.mode = "ask"; await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "config_option_update", configOptions: cfg(s) } }); }
     if (text.includes("pushmode")) { s.legacyMode = "ask"; await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "current_mode_update", currentModeId: "ask" } }); }

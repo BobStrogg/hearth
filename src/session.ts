@@ -161,7 +161,7 @@ export class LiveSession {
     return this.starting;
   }
 
-  private async start() {
+  private async start(skipLoad = false): Promise<void> {
     const child = spawn(this.agent.command, this.agent.args, {
       cwd: this.meta.cwd, stdio: ["pipe", "pipe", "pipe"], detached: true,
       env: { ...process.env, PATH: searchPath(), ...this.agent.env },
@@ -181,7 +181,7 @@ export class LiveSession {
       for (const t of this.terms.values()) t.kill();
       this.terms.clear();
       this.child = undefined; this.conn = undefined; this.prompting = false;
-      if (this.meta.state !== "exited") this.setState("stopped");
+      if (this.meta.state !== "exited" && !this.recycling) this.setState("stopped");
     });
 
     const raw = acp.ndJsonStream(Writable.toWeb(child.stdin!) as WritableStream<Uint8Array>, Readable.toWeb(child.stdout!) as ReadableStream<Uint8Array>);
@@ -191,7 +191,8 @@ export class LiveSession {
         // Track settings from the raw message: the SDK's parsed notification can drop unrecognised option shapes.
         const mm = msg as { method?: string; params?: { update?: Record<string, unknown> } };
         if (mm.method === "session/update" && mm.params?.update) { const next = applyUpdate(self.meta.settings ?? {}, mm.params.update); if (next) self.updateSettings(next); }
-        if (!(self.loading && (msg as { method?: string }).method === "session/update")) self.log("in", msg); ctl.enqueue(msg); },
+        if (!(mm.method === "session/update" && (self.loading || (self.dropIdleReplay && !self.prompting && REPLAY_KINDS.has(String(mm.params?.update?.sessionUpdate)))))) self.log("in", msg);
+        ctl.enqueue(msg); },
     }));
     const w = raw.writable.getWriter();
     const writable = new WritableStream({ async write(msg) { self.log("out", msg); await w.write(msg); }, close: () => w.close() });
@@ -208,17 +209,26 @@ export class LiveSession {
     const canResume = !!caps.sessionCapabilities?.resume;
     const seeding = this.meta.seeded === false; // imported: replay the agent's history into our transcript once
     let done = false;
-    if (prior && caps.loadSession) {
+    if (prior && caps.loadSession && !skipLoad) {
       this.loading = !seeding;
       try {
         if (seeding) this.log("sys", { event: "import_replay_start", agentSessionId: prior });
         const lr = await Promise.race([this.conn.loadSession({ sessionId: prior, cwd: this.meta.cwd, mcpServers: [] }), exited]);
         this.updateSettings(absorb(this.meta.settings ?? {}, lr as never));
         this.log("sys", { event: seeding ? "session_imported" : "session_loaded", agentSessionId: prior, via: "load" });
+        // Some agents keep replaying history after answering session/load; it's already in our transcript.
+        if (!seeding) this.dropIdleReplay = true;
         done = true;
       } catch (e) {
         this.log("sys", { event: "session_load_failed", error: String((e as Error)?.message ?? e) });
       } finally { this.loading = false; }
+      if (!done && canResume) {
+        // Some agents (seen with Devin) attach the session even when session/load fails, so a resume on the same
+        // process subscribes it twice and every update arrives 2-3x. Resume on a fresh process instead.
+        this.recycling = true;
+        try { await this.killChild(child); } finally { this.recycling = false; }
+        return this.start(true);
+      }
     }
     if (!done && prior && canResume) {
       try {
@@ -241,6 +251,16 @@ export class LiveSession {
     if (this.newlyCreated) { this.newlyCreated = false; await this.applyPrefs(); }
   }
 
+  private recycling = false;
+  private dropIdleReplay = false;
+  private async killChild(c: ChildProcess) {
+    if (c.exitCode !== null) return;
+    const gone = new Promise<void>((res) => c.once("exit", () => res()));
+    try { process.kill(-c.pid!, "SIGTERM"); } catch { c.kill("SIGTERM"); }
+    const t = setTimeout(() => { try { process.kill(-c.pid!, "SIGKILL"); } catch { /* gone */ } }, 3000);
+    await gone; clearTimeout(t);
+  }
+
   private async newAgentSession(exited: Promise<never>) {
     const r = await Promise.race([this.conn!.newSession({ cwd: this.meta.cwd, mcpServers: [] }), exited]);
     this.meta.agentSessionId = r.sessionId;
@@ -252,7 +272,7 @@ export class LiveSession {
   async prompt(content: acp.ContentBlock[]) {
     await this.ensureRunning();
     if (this.prompting) throw new Error("agent is busy; cancel first");
-    this.prompting = true; this.setState("running");
+    this.prompting = true; this.dropIdleReplay = false; this.setState("running");
     try {
       const r = await this.conn!.prompt({ sessionId: this.meta.agentSessionId!, prompt: content });
       if (this.meta.title === "New session") {
@@ -344,3 +364,4 @@ export class LiveSession {
 }
 
 const prefKey = (o: UiOption) => (o.via === "config" ? (o.category === "model" || o.category === "mode" ? `@${o.category}` : o.id) : o.id === MODE_ID ? "@mode" : o.id === MODEL_ID ? "@model" : o.id);
+const REPLAY_KINDS = new Set(["user_message_chunk", "agent_message_chunk", "agent_thought_chunk", "tool_call", "tool_call_update", "plan"]);

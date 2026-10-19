@@ -20,6 +20,8 @@ before(async () => {
     { id: "mockfull", name: "Mock full", detect: [process.execPath], command: process.execPath, args: [MOCK], env: { MOCK_LOAD_SESSION: "1", MOCK_LIST: "1", MOCK_RESUME: "1", MOCK_STORE: join(dataDir, "store.json") } },
     { id: "mockresume", name: "Mock resume", detect: [process.execPath], command: process.execPath, args: [MOCK], env: { MOCK_LIST: "1", MOCK_RESUME: "1", MOCK_STORE: join(dataDir, "store.json") } },
     { id: "mockcfg", name: "Mock config", detect: [process.execPath], command: process.execPath, args: [MOCK], env: { MOCK_CONFIG: "1" } },
+    { id: "devinfail", name: "Devin-like (load fails after attaching)", detect: [process.execPath], command: process.execPath, args: [MOCK], env: { MOCK_LOAD_SESSION: "1", MOCK_LIST: "1", MOCK_RESUME: "1", MOCK_LOAD_FAIL: "1", MOCK_STORE: join(dataDir, "store.json") } },
+    { id: "devinlate", name: "Devin-like (late replay)", detect: [process.execPath], command: process.execPath, args: [MOCK], env: { MOCK_LOAD_SESSION: "1", MOCK_LIST: "1", MOCK_RESUME: "1", MOCK_LATE_REPLAY: "1", MOCK_STORE: join(dataDir, "store.json") } },
     { id: "mockload", name: "Mock+load", detect: [process.execPath], command: process.execPath, args: [MOCK], env: { MOCK_LOAD_SESSION: "1" } },
   ]));
   writeFileSync(join(dataDir, "store.json"), JSON.stringify({
@@ -297,4 +299,26 @@ test("legacy modes + unstable models: set_mode, set_model, current_mode_update",
   s.send(JSON.stringify({ type: "prompt", text: "pushmode" }));
   await settled(s, (o) => val(o, mode.id) === "ask");
   s.close();
+});
+
+test("import + resume (Devin-like): no duplicated live stream or history", async () => {
+  const U = "devin@example.com"; await api(U, "POST", "/api/unlock", { password: PW });
+  const words = (t, w) => t.split(w).length - 1;
+  for (const agentId of ["devinfail", "devinlate"]) {
+    const imp = await api(U, "POST", "/api/sessions/import", { agentId, agentSessionId: "cli-1", cwd: join(root, "proj"), title: "imp" });
+    assert.ok([200, 201].includes(imp.status), `${agentId}: ${JSON.stringify(imp.json)}`);
+    const s = await ws(U, imp.json.id);
+    await s.until((m) => m.type === "state" && m.state === "idle");
+    await new Promise((r) => setTimeout(r, 200)); // let any late replay land
+    for (let round = 0; round < 2; round++) {
+      s.send(JSON.stringify({ type: "prompt", text: "stream" }));
+      await s.until((m) => m.type === "prompt_done" && s.msgs.filter((x) => x.type === "prompt_done").length === round + 1);
+      await new Promise((r) => setTimeout(r, 200));
+      if (round === 0) { h.live.get(imp.json.id).child.kill("SIGKILL"); await s.until((m) => m.type === "state" && m.state === "stopped"); await api(U, "POST", `/api/sessions/${imp.json.id}/resume`); await new Promise((r) => setTimeout(r, 200)); }
+    }
+    const t = text(h.store.read(h.live.get(imp.json.id).meta));
+    assert.equal(words(t, "one "), 2, `${agentId}: one copy per turn: ${t}`);
+    if (agentId === "devinlate") assert.equal(words(t, "Parser fixed."), 1, `${agentId}: history once: ${t}`);
+    s.close(); await api(U, "DELETE", `/api/sessions/${imp.json.id}?purge=1`);
+  }
 });
