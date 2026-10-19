@@ -123,7 +123,12 @@ async function importSessions() {
 class Chat {
   constructor(id) {
     this.id = id; this.lastSeq = 0; this.tools = new Map(); this.cur = null; this.perms = new Map(); this.retry = 0; this.closed = false;
-    this.log = h("div", { class: "log", role: "log", "aria-live": "polite", onscroll: () => this.maybeOlder() });
+    this.log = h("div", { class: "log", role: "log", "aria-live": "polite", onscroll: () => this.onScroll(),
+      onclick: (e) => { if (e.target.matches?.("img.inl")) lightbox(e.target); } });
+    this.log.addEventListener("error", (e) => { if (e.target.matches?.("img.inl")) brokenImage(e.target); }, true);
+    this.atEnd = true; this.mdOpts = { img: (u) => imageSrc(this.id, u) };
+    // Images load (and get their real height) after they're laid out: keep the view still while that happens.
+    this.ro = typeof ResizeObserver === "function" ? new ResizeObserver((ents) => this.imgResized(ents)) : null;
     this.top = h("div", { class: "histtop", hidden: true }); this.firstSeq = null; this.hasMore = false; this.loadingOlder = false;
     this.permBox = h("div", { class: "perms" });
     this.input = h("textarea", { rows: 1, placeholder: "Message the agent…", "aria-label": "Message", oninput: () => this.grow(),
@@ -135,6 +140,30 @@ class Chat {
     this.onVis = () => { if (document.visibilityState === "visible" && (!this.ws || this.ws.readyState > 1)) this.connect(); };
     document.addEventListener("visibilitychange", this.onVis);
     this.connect();
+  }
+  /** "Following the end" only changes when you scroll: content growing (images loading) doesn't turn it off. */
+  onScroll() {
+    const t = this.log.scrollTop, gap = this.endGap();
+    if (gap < 40) this.atEnd = true; else if (t < (this.lastTop ?? 0) - 2) this.atEnd = false;
+    this.lastTop = t; this.maybeOlder();
+  }
+  endGap() { return this.log.scrollHeight - this.log.scrollTop - this.log.clientHeight; }
+  toEnd() { this.log.scrollTop = this.log.scrollHeight; this.atEnd = true; this.lastTop = this.log.scrollTop; }
+  /** Start tracking the height of not-yet-tracked inline images under `root` (only once they're in the live log). */
+  watch(root) {
+    if (!this.ro || !root?.isConnected || !this.log.isConnected) return;
+    for (const img of root.querySelectorAll("img.inl:not([data-w])")) { img.dataset.w = "1"; img._h = img.offsetHeight; this.ro.observe(img); }
+  }
+  imgResized(ents) {
+    const lt = this.log.getBoundingClientRect().top;
+    for (const en of ents) {
+      const img = en.target;
+      if (!img.isConnected) { this.ro.unobserve(img); continue; }
+      const nh = img.offsetHeight, d = nh - (img._h ?? nh); img._h = nh;
+      if (!d) continue;
+      if (this.atEnd) this.toEnd();                                   // following the conversation: stay at the end
+      else if (img.getBoundingClientRect().top < lt) this.log.scrollTop += d; // grew above what you're reading: compensate
+    }
   }
   grow() { this.input.style.height = "auto"; this.input.style.height = Math.min(this.input.scrollHeight, 160) + "px"; }
   /** Exactly one socket per chat: a dropped-connection retry and a tab-refocus reconnect used to race and leave
@@ -164,7 +193,7 @@ class Chat {
     this.input.value = ""; this.grow();
   }
   onMsg(m) {
-    const atBottom = this.log.scrollHeight - this.log.scrollTop - this.log.clientHeight < 80;
+    const atBottom = this.atEnd || this.endGap() < 80;
     this.stick = atBottom;
     const initial = m.type === "replay" && this.lastSeq === 0;
     if (m.type === "replay") {
@@ -181,8 +210,8 @@ class Chat {
     else if (m.type === "prompt_done") { this.cur = null; if (m.stopReason !== "end_turn") this.note(`Stopped: ${m.stopReason}`); }
     else if (m.type === "error" && /setting|config|mode|model/i.test(m.message) && this.options.length) { this.renderCtl(); this.note(m.message, "err"); }
     else if (m.type === "error") this.note(/auth/i.test(m.message) ? `${m.message}. Sign in to this agent once on the computer itself (for example run "claude" then /login, or "grok login").` : m.message, "err");
-    if (atBottom || initial) this.log.scrollTop = this.log.scrollHeight;
-    if (initial) this.fillScreen();
+    if (atBottom || initial) this.toEnd();
+    if (initial) { this.watch(this.log); this.fillScreen(); }
   }
   // ---- lazy history: older pages load when you scroll near the top, keeping your place ----
   showTop() {
@@ -210,6 +239,7 @@ class Chat {
     const log = this.log, beforeH = log.scrollHeight, beforeTop = log.scrollTop;
     this.top.after(...frag.childNodes);
     log.scrollTop = beforeTop + (log.scrollHeight - beforeH); // anchor: what you were looking at stays put
+    this.watch(log); // images in the new page: later height changes are compensated in imgResized
     if (items.length) this.firstSeq = items[0].seq;
     this.hasMore = !!m.hasMore && items.length > 0; this.showTop();
     requestAnimationFrame(() => this.fillScreen());
@@ -225,8 +255,10 @@ class Chat {
     const msg = e.msg || {};
     if (e.dir === "out" && msg.method === "session/prompt") {
       this.cur = null;
-      const t = (msg.params.prompt || []).map((c) => c.text ?? (c.type === "image" ? "[image]" : "")).join("");
-      this.log.append(h("div", { class: "msg user" }, t));
+      const blocks = msg.params.prompt || [];
+      const el = h("div", { class: "msg user" }, blocks.map((c) => c.text ?? "").join(""));
+      for (const c of blocks) { const im = imageOf(c); if (im) el.append(this.figure(im) ?? h("div", {}, `[image: ${im.alt}]`)); }
+      this.log.append(el); this.watch(el);
     } else if (e.dir === "in" && msg.method === "session/update") this.update(msg.params.update);
     else if (e.dir === "sys") {
       const ev = msg.event;
@@ -244,10 +276,14 @@ class Chat {
     switch (u.sessionUpdate) {
       case "agent_message_chunk": case "user_message_chunk": {
         const role = u.sessionUpdate === "user_message_chunk" ? "user" : "agent";
-        if (!this.cur || this.cur.role !== role) { this.cur = { role, text: "", el: h("div", { class: `msg ${role} md` }) }; this.log.append(this.cur.el); }
-        const c = u.content || {};
-        if (c.type === "text") this.cur.text += c.text; else if (c.type === "image") this.cur.text += "\n[image]\n"; else if (c.type === "resource_link") this.cur.text += ` [${c.name || c.uri}]`;
-        this.paint(this.cur.el, this.cur);
+        if (!this.cur || this.cur.role !== role) { this.cur = { role, seg: null, el: h("div", { class: `msg ${role} md` }) }; this.log.append(this.cur.el); }
+        const c = u.content || {}; const im = imageOf(c);
+        if (im) {
+          const f = this.figure(im);
+          if (f) { this.cur.seg = null; this.cur.el.append(f); this.watch(f); if (this.stick) this.toEnd(); }
+          else this.addText(`\n[image: ${im.alt}]\n`);
+        } else if (c.type === "text") this.addText(c.text ?? "");
+        else if (c.type === "resource_link") this.addText(` [${c.name || c.uri}]`);
         break;
       }
       case "agent_thought_chunk": {
@@ -273,11 +309,23 @@ class Chat {
       default: break;
     }
   }
+  /** Text goes into the message's current text segment (an image block ends the segment, so text after it follows it). */
+  addText(t) {
+    const cur = this.cur;
+    if (!cur.seg) { cur.seg = { text: "", el: h("div", { class: "seg" }) }; cur.el.append(cur.seg.el); }
+    cur.seg.text += t; this.paint(cur.seg.el, cur.seg);
+  }
+  /** Inline image with a caption link (Open / Save); null if the block isn't a displayable image. */
+  figure(im) {
+    const src = blockSrc(this.id, im); if (!src) return null;
+    return h("figure", { class: "img" }, h("img", { class: "inl", loading: "lazy", decoding: "async", alt: im.alt || "image",
+      ...(im.width && im.height ? { width: im.width, height: im.height } : {}), src }), h("figcaption", {}, imageAction(src, im.alt)));
+  }
   // Progressive rendering: every chunk is appended immediately; markdown is re-rendered at most once per frame.
   paint(el, cur) {
     el._cur = cur;
     if (el._raf) return;
-    const draw = () => { el._raf = 0; el.innerHTML = renderMarkdown(el._cur.text); if (this.stick) this.log.scrollTop = this.log.scrollHeight; };
+    const draw = () => { el._raf = 0; el.innerHTML = renderMarkdown(el._cur.text, this.mdOpts); this.watch(el); if (this.stick) this.toEnd(); };
     if (document.visibilityState !== "visible" || this.replaying) return draw();
     el._raf = requestAnimationFrame(draw);
   }
@@ -285,15 +333,28 @@ class Chat {
     const d = t.data; const open = t.el.open;
     const icon = { pending: "○", in_progress: "◐", completed: "✓", failed: "✗" }[d.status] || "•";
     const body = h("div", { class: "tool-body" });
+    // Image figures are reused across updates (same source -> same node), so re-rendering doesn't reload/re-measure them.
+    const figs = new Map(); const seen = new Set();
+    const fig = (im) => {
+      const k = imgKey(im); if (seen.has(k)) return null; seen.add(k);
+      const f = t.figs?.get(k) ?? this.figure(im); if (f) figs.set(k, f); return f;
+    };
     for (const c of d.content || []) {
+      const im = c.type === "content" ? imageOf(c.content) : null;
       if (c.type === "diff") body.append(h("div", { class: "path" }, short(c.path)), diffView(c.oldText ?? "", c.newText ?? ""));
+      else if (im) body.append(fig(im) ?? h("div", { class: "muted" }, `[image: ${im.alt}]`));
       else if (c.type === "content" && c.content?.type === "text") body.append(h("pre", {}, c.content.text));
       else if (c.type === "terminal") body.append(h("div", { class: "muted" }, `terminal ${c.terminalId}`));
     }
-    if (d.rawInput && !(d.content || []).length) body.append(h("pre", {}, JSON.stringify(d.rawInput, null, 2).slice(0, 4000)));
-    if (d.rawOutput) body.append(h("pre", {}, (typeof d.rawOutput === "string" ? d.rawOutput : JSON.stringify(d.rawOutput, null, 2)).slice(0, 4000)));
+    if (d.rawInput && !(d.content || []).length) body.append(h("pre", {}, JSON.stringify(d.rawInput, squash, 2).slice(0, 4000)));
+    if (d.rawOutput) {
+      for (const im of findImages(d.rawOutput)) { const f = fig(im); if (f) body.append(f); }
+      body.append(h("pre", {}, (typeof d.rawOutput === "string" ? d.rawOutput : JSON.stringify(d.rawOutput, squash, 2)).slice(0, 4000)));
+    }
+    t.figs = figs;
     t.el.replaceChildren(h("summary", { class: d.status || "" }, `${icon} ${d.title || d.kind || "Tool"}`), body);
-    t.el.open = open || (d.content || []).some((c) => c.type === "diff");
+    t.el.open = open || (d.content || []).some((c) => c.type === "diff") || figs.size > 0;
+    this.watch(t.el);
   }
   setOpt(o, value) { this.ws?.readyState === 1 && this.ws.send(JSON.stringify({ type: "setOption", configId: o.id, value })); }
   /** Model and mode as compact pills by the composer; everything else behind the gear. */
@@ -336,6 +397,84 @@ class Chat {
         onclick: () => this.ws.send(JSON.stringify({ type: "permission", id: m.id, optionId: o.optionId })) }, o.name))));
     this.perms.set(m.id, el); this.permBox.append(el);
   }
+}
+
+// ---------- images ----------
+// Only raster formats plus SVG, and SVG only ever as an <img> (never inline markup, where it could run script).
+const IMG_MIME = { "image/png": 1, "image/jpeg": 1, "image/jpg": 1, "image/gif": 1, "image/webp": 1, "image/avif": 1, "image/svg+xml": 1 };
+const IMG_EXT = /\.(png|jpe?g|gif|webp|avif|svg)$/i;
+const DATA_IMG = /^data:image\/(png|jpeg|gif|webp|avif|svg\+xml);base64,[A-Za-z0-9+/=\s]+$/i;
+const baseName = (u) => String(u || "").split(/[?#]/)[0].split("/").pop() || "image";
+/** An ACP content block as an image: `image` (base64 data and/or uri), `resource_link` / embedded `resource` with an image mimeType. */
+function imageOf(c) {
+  if (!c || typeof c !== "object") return null;
+  if (c.type === "image" && (c.data || c.uri)) return { mime: c.mimeType, data: c.data, uri: c.uri, alt: c.uri ? baseName(c.uri) : "image", width: c.width, height: c.height };
+  if (c.type === "resource_link" && c.uri && (/^image\//i.test(c.mimeType || "") || (!c.mimeType && IMG_EXT.test(String(c.uri).split(/[?#]/)[0]))))
+    return { mime: c.mimeType, uri: c.uri, alt: c.title || c.name || baseName(c.uri) };
+  const r = c.type === "resource" ? c.resource : null;
+  if (r && /^image\//i.test(r.mimeType || "") && (r.blob || r.uri)) return { mime: r.mimeType, data: r.blob, uri: r.blob ? undefined : r.uri, alt: baseName(r.uri) };
+  return null;
+}
+const imgKey = (im) => im.data ? `d:${im.data.length}:${im.data.slice(0, 64)}:${im.data.slice(-64)}` : `u:${im.uri}`;
+/** Image-looking objects inside a tool's rawOutput (e.g. MCP results: { content: [{ type: "image", data, mimeType }] }). */
+function findImages(v, depth = 0, out = []) {
+  if (!v || typeof v !== "object" || depth > 5 || out.length >= 12) return out;
+  const im = imageOf(v); if (im && im.data) { out.push(im); return out; }
+  for (const x of Array.isArray(v) ? v : Object.values(v)) findImages(x, depth + 1, out);
+  return out;
+}
+/** JSON.stringify replacer: don't dump base64 blobs into tool cards. */
+function squash(k, v) { return typeof v === "string" && v.length > 300 && /^[A-Za-z0-9+/=\r\n]+$/.test(v.slice(0, 300)) ? `<${v.length} chars of base64>` : v; }
+function blockSrc(id, im) {
+  if (im.data) {
+    const mime = String(im.mime || "").toLowerCase().replace("image/jpg", "image/jpeg");
+    if (!IMG_MIME[mime] || typeof im.data !== "string") return null;
+    const src = `data:${mime};base64,${im.data}`;
+    return DATA_IMG.test(src) ? src : null;
+  }
+  return imageSrc(id, im.uri);
+}
+/** Safe src for an image reference: base64 image data: URLs, http(s), or a file on this computer (file://, absolute or
+ *  relative to the session folder) via Hearth's authenticated endpoint, which only serves images inside that folder. */
+function imageSrc(id, u) {
+  u = String(u || "").trim(); if (!u) return null;
+  if (/^data:/i.test(u)) return DATA_IMG.test(u) ? u : null;
+  if (/^https?:\/\//i.test(u)) return u;
+  let path = null;
+  if (/^file:\/\//i.test(u)) { try { const x = new URL(u); if (!x.host || x.host === "localhost") path = decodeURIComponent(x.pathname); } catch { /* bad uri */ } }
+  else if (!/^[a-z][a-z0-9+.-]*:/i.test(u)) path = u;
+  if (!path || path.startsWith("~")) return null; // ~ isn't expanded: keep it a plain link
+  return `/api/sessions/${id}/file?path=${encodeURIComponent(path)}`;
+}
+function dataToBlob(src) {
+  const [head, b64] = src.split(","); const bin = atob(b64.replace(/\s/g, ""));
+  const a = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) a[i] = bin.charCodeAt(i);
+  return new Blob([a], { type: head.slice(5).split(";")[0] });
+}
+/** "Open" (served/remote images, new tab) or "Save" (inline data: images, downloaded, never navigated to). */
+function imageAction(src, alt) {
+  if (!src.startsWith("data:")) return h("a", { href: src, target: "_blank", rel: "noopener noreferrer", class: "imgact" }, "Open");
+  return h("button", { class: "imgact", type: "button", onclick: (e) => {
+    e.stopPropagation();
+    const blob = dataToBlob(src); const url = URL.createObjectURL(blob);
+    const ext = blob.type.split("/")[1].replace("svg+xml", "svg").replace("jpeg", "jpg");
+    const name = /\.[a-z0-9]+$/i.test(alt || "") ? alt : `image.${ext}`;
+    const a = h("a", { href: url, download: name }); document.body.append(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  } }, "Save");
+}
+function lightbox(img) {
+  const close = () => { box.remove(); removeEventListener("keydown", onKey); };
+  const onKey = (e) => { if (e.key === "Escape") close(); };
+  const src = img.currentSrc || img.src;
+  const box = h("div", { class: "lightbox", role: "dialog", "aria-modal": "true", "aria-label": img.alt || "Image",
+    onclick: (e) => { if (!e.target.closest(".lb-actions a, .lb-actions .imgact")) close(); } },
+    h("img", { src, alt: img.alt }), h("div", { class: "lb-actions" }, imageAction(src, img.alt), h("button", { type: "button", class: "imgact" }, "Close")));
+  document.body.append(box); addEventListener("keydown", onKey);
+}
+function brokenImage(img) {
+  if (img.dataset.broken) return; img.dataset.broken = "1";
+  img.replaceWith(h("span", { class: "muted imgbroken" }, `🖼 ${img.alt || "image"} (couldn't be shown${img.src.includes("/file?") ? ": not an image inside the session folder" : ""})`));
 }
 
 function selectChoices(o) {

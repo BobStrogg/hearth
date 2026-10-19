@@ -53,3 +53,12 @@ code { font-family:ui-monospace, Menlo, monospace; font-size:.88em; }
 .composer textarea { flex:1; resize:none; max-height:160px; }
 .dirs li.ext { cursor:default; } .dirs li.ext .meta { color:var(--muted); font-size:.85rem; }
 .histtop { align-self:center; font-size:.75rem; color:var(--muted); padding:.2rem 0 .4rem; min-height:1.4rem; } .histtop.loading { opacity:.8; }
+figure.img { margin:.35rem 0; max-width:100%; }
+img.inl { display:block; max-width:100%; max-height:min(60dvh, 520px); height:auto; width:auto; object-fit:contain; border-radius:8px; background:#0002; cursor:zoom-in; }
+.md img.inl { margin:.3rem 0; }
+figcaption { margin-top:.2rem; font-size:.75rem; }
+.imgact { font-size:.75rem; min-height:0; padding:.15rem .55rem; border-radius:99px; color:var(--muted); text-decoration:none; border:1px solid var(--line); background:var(--card); display:inline-block; }
+.imgbroken { font-size:.8rem; display:inline-block; margin:.2rem 0; }
+.lightbox { position:fixed; inset:0; z-index:20; background:#000d; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:.6rem; padding:calc(.8rem + env(safe-area-inset-top)) .8rem calc(.8rem + env(safe-area-inset-bottom)); cursor:zoom-out; overscroll-behavior:contain; touch-action:pinch-zoom; }
+.lightbox img { max-width:100%; max-height:calc(100dvh - 6rem); object-fit:contain; border-radius:6px; }
+.lb-actions { display:flex; gap:.5rem; } .lb-actions .imgact { font-size:.9rem; padding:.35rem .9rem; color:var(--fg); background:#222a; border-color:#fff4; }

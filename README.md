@@ -13,7 +13,8 @@ Cursor and Devin.
 - **Import existing sessions.** List the sessions an agent already has (from its own CLI) and continue one in Hearth.
   It uses ACP `session/list`, then `session/load` (which replays the history into Hearth's transcript) or `session/resume`.
   If `session/list` isn't available, Claude Code and Codex sessions are listed read-only from their local files.
-- **Phone-first chat UI.** Streaming markdown, tool-call cards, diffs, plans, approve/deny buttons for permission requests,
+- **Phone-first chat UI.** Streaming markdown, inline images (from agent messages, tool results and markdown; tap to
+  enlarge), tool-call cards, diffs, plans, approve/deny buttons for permission requests,
   stop and rename. It also works as a PWA.
 - **Private by design.** It listens on 127.0.0.1 only. Each session belongs to the identity that created it, with no
   admin view. It has Host, Origin and CSRF checks and an optional password unlock (including the OS account password).

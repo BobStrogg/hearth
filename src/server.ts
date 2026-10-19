@@ -1,7 +1,7 @@
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { homedir } from "node:os";
-import { extname, join, resolve } from "node:path";
+import { basename, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer, type WebSocket } from "ws";
 import { type AgentDef, deepProbe, loadAgents, probe } from "./agents.js";
@@ -40,8 +40,23 @@ export function configFromEnv(env = process.env): Config {
 const MIME: Record<string, string> = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".json": "application/json", ".webmanifest": "application/manifest+json" };
 const SEC_HEADERS = {
   "x-content-type-options": "nosniff", "referrer-policy": "no-referrer", "x-frame-options": "DENY",
-  "content-security-policy": "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; frame-ancestors 'none'",
+  "content-security-policy": "default-src 'self'; connect-src 'self'; img-src 'self' data: blob: https:; style-src 'self'; script-src 'self'; frame-ancestors 'none'",
 };
+/** Image types the session-file endpoint will serve (by extension, confirmed by magic bytes). */
+const IMAGE_TYPES: Record<string, string> = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp", ".avif": "image/avif", ".svg": "image/svg+xml" };
+const MAX_IMAGE_BYTES = 30 * 1024 * 1024;
+export function sniffImage(b: Buffer, type: string): boolean {
+  const at = (off: number, s: string) => b.subarray(off, off + s.length).toString("latin1") === s;
+  switch (type) {
+    case "image/png": return at(0, "\x89PNG\r\n\x1a\n");
+    case "image/jpeg": return b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff;
+    case "image/gif": return at(0, "GIF87a") || at(0, "GIF89a");
+    case "image/webp": return at(0, "RIFF") && at(8, "WEBP");
+    case "image/avif": return at(4, "ftyp") && ["avif", "avis", "mif1", "msf1"].some((x) => at(8, x));
+    case "image/svg+xml": { const head = b.subarray(0, 4096).toString("utf8"); return !head.includes("\0") && /<svg[\s>]/i.test(head); }
+    default: return false;
+  }
+}
 
 export class Hearth {
   store: Store; auth: Auth; agents: AgentDef[];
@@ -175,6 +190,12 @@ export class Hearth {
         return this.send(s, 201, this.view(m));
       }
     }
+    const fm = /^\/api\/sessions\/([a-f0-9-]{36})\/file$/.exec(url.pathname);
+    if (fm && q.method === "GET") {
+      const m = this.live.get(fm[1])?.meta.owner === who ? this.live.get(fm[1])!.meta : this.store.get(who, fm[1]);
+      if (!m || m.owner !== who) return this.send(s, 404, { error: "not found" });
+      return this.sessionImage(s, m, url.searchParams.get("path") ?? "");
+    }
     const sm = /^\/api\/sessions\/([a-f0-9-]{36})(\/resume)?$/.exec(url.pathname);
     if (sm) {
       const m = this.live.get(sm[1])?.meta.owner === who ? this.live.get(sm[1])!.meta : this.store.get(who, sm[1]);
@@ -195,6 +216,34 @@ export class Hearth {
       }
     }
     return this.send(s, 404, { error: "not found" });
+  }
+
+  /**
+   * An image file referenced by the agent (file:// uri, absolute or session-relative path). Only image types, only
+   * inside the session's folder (symlinks resolved), content checked by magic bytes, size-capped. Served sandboxed so
+   * an SVG opened directly can't run script.
+   */
+  private sessionImage(s: ServerResponse, m: SessionMeta, raw: string) {
+    let p = raw;
+    if (/^file:\/\//i.test(p)) { try { p = fileURLToPath(p); } catch { return this.send(s, 400, { error: "bad file uri" }); } }
+    if (!p || p.length > 4096 || p.includes("\0")) return this.send(s, 400, { error: "bad path" });
+    const abs = resolve(m.cwd, p);
+    const type = IMAGE_TYPES[extname(abs).toLowerCase()];
+    if (!type) return this.send(s, 415, { error: "not an image" });
+    if (!within(m.cwd, abs)) return this.send(s, 403, { error: "outside the session folder" }); // before any existence check
+    let real: string;
+    try { real = realpathSync(abs); } catch { return this.send(s, 404, { error: "not found" }); }
+    if (!within(m.cwd, real)) return this.send(s, 403, { error: "outside the session folder" });
+    if (IMAGE_TYPES[extname(real).toLowerCase()] !== type) return this.send(s, 415, { error: "not an image" });
+    const st = statSync(real, { throwIfNoEntry: false });
+    if (!st?.isFile()) return this.send(s, 404, { error: "not found" });
+    if (st.size > MAX_IMAGE_BYTES) return this.send(s, 413, { error: "image too large" });
+    const buf = readFileSync(real);
+    if (!sniffImage(buf, type)) return this.send(s, 415, { error: "not an image" });
+    s.writeHead(200, { ...SEC_HEADERS, "content-type": type, "content-length": String(buf.length), "cache-control": "private, max-age=300",
+      "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox", "cross-origin-resource-policy": "same-origin",
+      "content-disposition": `inline; filename="${basename(real).replace(/[^\w.-]/g, "_")}"` });
+    s.end(buf);
   }
 
   private static(path: string, s: ServerResponse) {
