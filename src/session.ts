@@ -4,8 +4,11 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
+import { createRequire } from "node:module";
+const HEARTH_VERSION: string = (createRequire(import.meta.url)("../package.json") as { version: string }).version;
 import { type AgentDef, searchPath } from "./agents.js";
 import type { SessionMeta, Store, TranscriptEntry } from "./store.js";
+import { absorb, applyUpdate, MODE_ID, MODEL_ID, normalize, setLocal, valid, type RawSettings, type UiOption } from "./settings.js";
 
 export type LiveEvent =
   | { type: "entry"; entry: TranscriptEntry }
@@ -13,7 +16,8 @@ export type LiveEvent =
   | { type: "permission"; id: string; params: acp.RequestPermissionRequest }
   | { type: "permission_resolved"; id: string; optionId?: string }
   | { type: "prompt_done"; stopReason: string }
-  | { type: "error"; message: string };
+  | { type: "error"; message: string }
+  | { type: "settings"; options: UiOption[] };
 
 interface Pending { params: acp.RequestPermissionRequest; resolve: (r: acp.RequestPermissionResponse) => void }
 export interface Term { buf: Buffer; truncated: boolean; exit?: { exitCode: number | null; signal: string | null }; done: Promise<void>; text(): string; kill(): void }
@@ -105,6 +109,44 @@ export class LiveSession {
     } catch { /* ignore */ }
   }
 
+  get options(): UiOption[] { return normalize(this.meta.settings ?? {}); }
+  updateSettings(next: RawSettings) {
+    this.meta.settings = next;
+    try { this.store.save(this.meta); } catch { /* purged */ }
+    this.emit({ type: "settings", options: this.options });
+  }
+
+  /** Change one setting via the right ACP call; remembers it as this user's default for the agent. */
+  async setOption(id: string, value: unknown, remember = true) {
+    await this.ensureRunning();
+    const opt = this.options.find((o) => o.id === id);
+    if (!opt) throw new Error(`unknown setting ${id}`);
+    if (!valid(opt, value)) throw new Error(`invalid value for ${opt.name}`);
+    const sessionId = this.meta.agentSessionId!;
+    if (opt.via === "mode") { await this.conn!.setSessionMode({ sessionId, modeId: String(value) }); this.updateSettings(setLocal(this.meta.settings ?? {}, opt, value)); }
+    else if (opt.via === "model") { await this.conn!.request("session/set_model", { sessionId, modelId: String(value) }); this.updateSettings(setLocal(this.meta.settings ?? {}, opt, value)); }
+    else {
+      const req = typeof value === "boolean" ? { sessionId, configId: id, type: "boolean" as const, value } : { sessionId, configId: id, value };
+      const r = await this.conn!.setSessionConfigOption(req as acp.SetSessionConfigOptionRequest);
+      this.updateSettings(Array.isArray(r?.configOptions) ? absorb(this.meta.settings ?? {}, r as never) : setLocal(this.meta.settings ?? {}, opt, value));
+    }
+    if (remember) { try { this.store.setPref(this.meta.owner, this.meta.agentId, prefKey(opt), value); } catch { /* ignore */ } }
+  }
+
+  /** New sessions: apply the user's remembered choices that the agent still offers. Failures are logged, not fatal. */
+  private async applyPrefs() {
+    const prefs = this.store.getPrefs(this.meta.owner)[this.meta.agentId] ?? {};
+    // model first: other options (e.g. reasoning effort) can depend on it
+    const order = (o: UiOption) => (o.category === "model" ? 0 : o.category === "mode" ? 1 : 2);
+    for (const opt of [...this.options].sort((a, b) => order(a) - order(b))) {
+      const want = prefs[prefKey(opt)];
+      const cur = this.options.find((o) => o.id === opt.id);
+      if (want === undefined || !cur || cur.value === want || !valid(cur, want)) continue;
+      try { await this.setOption(cur.id, want, false); }
+      catch (e) { this.log("sys", { event: "setting_default_failed", option: opt.name, error: String((e as Error)?.message ?? e) }); }
+    }
+  }
+
   setState(state: SessionMeta["state"]) {
     this.meta.state = state; clearTimeout(this.saveTimer); this.saveTimer = undefined; this.store.save(this.meta);
     this.emit({ type: "state", state, title: this.meta.title });
@@ -145,7 +187,11 @@ export class LiveSession {
     const raw = acp.ndJsonStream(Writable.toWeb(child.stdin!) as WritableStream<Uint8Array>, Readable.toWeb(child.stdout!) as ReadableStream<Uint8Array>);
     const self = this;
     const readable = raw.readable.pipeThrough(new TransformStream({
-      transform(msg, ctl) { if (!(self.loading && (msg as { method?: string }).method === "session/update")) self.log("in", msg); ctl.enqueue(msg); },
+      transform(msg, ctl) {
+        // Track settings from the raw message: the SDK's parsed notification can drop unrecognised option shapes.
+        const mm = msg as { method?: string; params?: { update?: Record<string, unknown> } };
+        if (mm.method === "session/update" && mm.params?.update) { const next = applyUpdate(self.meta.settings ?? {}, mm.params.update); if (next) self.updateSettings(next); }
+        if (!(self.loading && (msg as { method?: string }).method === "session/update")) self.log("in", msg); ctl.enqueue(msg); },
     }));
     const w = raw.writable.getWriter();
     const writable = new WritableStream({ async write(msg) { self.log("out", msg); await w.write(msg); }, close: () => w.close() });
@@ -154,7 +200,7 @@ export class LiveSession {
     const init = await Promise.race([this.conn.initialize({
       protocolVersion: acp.PROTOCOL_VERSION,
       clientCapabilities: { fs: { readTextFile: true, writeTextFile: true }, terminal: true },
-      clientInfo: { name: "hearth", version: "0.2.0" },
+      clientInfo: { name: "hearth", version: HEARTH_VERSION },
     }), exited]);
     this.caps = init;
     const prior = this.meta.agentSessionId;
@@ -166,7 +212,8 @@ export class LiveSession {
       this.loading = !seeding;
       try {
         if (seeding) this.log("sys", { event: "import_replay_start", agentSessionId: prior });
-        await Promise.race([this.conn.loadSession({ sessionId: prior, cwd: this.meta.cwd, mcpServers: [] }), exited]);
+        const lr = await Promise.race([this.conn.loadSession({ sessionId: prior, cwd: this.meta.cwd, mcpServers: [] }), exited]);
+        this.updateSettings(absorb(this.meta.settings ?? {}, lr as never));
         this.log("sys", { event: seeding ? "session_imported" : "session_loaded", agentSessionId: prior, via: "load" });
         done = true;
       } catch (e) {
@@ -175,7 +222,8 @@ export class LiveSession {
     }
     if (!done && prior && canResume) {
       try {
-        await Promise.race([this.conn.resumeSession({ sessionId: prior, cwd: this.meta.cwd, mcpServers: [] }), exited]);
+        const rr = await Promise.race([this.conn.resumeSession({ sessionId: prior, cwd: this.meta.cwd, mcpServers: [] }), exited]);
+        this.updateSettings(absorb(this.meta.settings ?? {}, rr as never));
         this.log("sys", { event: seeding ? "session_imported" : "session_resumed", agentSessionId: prior, via: "resume",
           note: seeding ? "agent resumed the session but doesn't replay history over ACP; earlier messages aren't shown" : undefined });
         done = true;
@@ -190,12 +238,16 @@ export class LiveSession {
     }
     if (seeding) { this.meta.seeded = true; if (this.meta.importedFrom) this.meta.importedFrom.via = this.meta.agentSessionId === prior ? (caps.loadSession ? "load" : "resume") : "pending"; this.store.save(this.meta); }
     this.setState("idle");
+    if (this.newlyCreated) { this.newlyCreated = false; await this.applyPrefs(); }
   }
 
   private async newAgentSession(exited: Promise<never>) {
     const r = await Promise.race([this.conn!.newSession({ cwd: this.meta.cwd, mcpServers: [] }), exited]);
-    this.meta.agentSessionId = r.sessionId; this.store.save(this.meta);
+    this.meta.agentSessionId = r.sessionId;
+    this.updateSettings(absorb({}, r as never));
+    this.newlyCreated = true;
   }
+  private newlyCreated = false;
 
   async prompt(content: acp.ContentBlock[]) {
     await this.ensureRunning();
@@ -255,7 +307,7 @@ export class LiveSession {
         this.pending.set(id, { params, resolve: resolveP });
         this.emit({ type: "permission", id, params });
       }),
-      sessionUpdate: async () => { /* already logged & broadcast by the stream tap */ },
+      sessionUpdate: async () => { /* logged, broadcast and settings-tracked by the stream tap */ },
       readTextFile: async ({ path, line, limit }) => {
         this.checkPath(path);
         let text = await readFile(path, "utf8");
@@ -290,3 +342,5 @@ export class LiveSession {
 
   private term(id: string) { const t = this.terms.get(id); if (!t) throw acp.RequestError.invalidParams({ terminalId: id }, "unknown terminal"); return t; }
 }
+
+const prefKey = (o: UiOption) => (o.via === "config" ? (o.category === "model" || o.category === "mode" ? `@${o.category}` : o.id) : o.id === MODE_ID ? "@mode" : o.id === MODEL_ID ? "@model" : o.id);

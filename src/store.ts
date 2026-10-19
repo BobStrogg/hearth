@@ -16,7 +16,11 @@ export interface SessionMeta {
   /** For imported sessions: false until the agent's own history has been replayed into the transcript once. */
   seeded?: boolean;
   importedFrom?: { agentSessionId: string; via: "load" | "resume" | "pending" };
+  /** Last known agent settings (config options / modes / models), so the UI can show them before the agent restarts. */
+  settings?: import("./settings.js").RawSettings;
 }
+/** Per-user, per-agent preferred settings used as defaults for new sessions: { [agentId]: { [optionId]: value } } */
+export type Prefs = Record<string, Record<string, string | boolean>>;
 
 export interface TranscriptEntry {
   seq: number;
@@ -74,7 +78,7 @@ export class Store {
     const base = join(this.root, "users");
     if (!existsSync(base)) return [];
     const out: SessionMeta[] = [];
-    for (const u of readdirSync(base)) for (const id of readdirSync(join(base, u, "sessions"))) {
+    for (const u of readdirSync(base)) for (const id of existsSync(join(base, u, "sessions")) ? readdirSync(join(base, u, "sessions")) : []) {
       try { out.push(JSON.parse(readFileSync(join(base, u, "sessions", id, "meta.json"), "utf8"))); } catch { /* skip */ }
     }
     return out;
@@ -95,6 +99,16 @@ export class Store {
       try { const e = JSON.parse(line) as TranscriptEntry; if (e.seq > since) out.push(e); } catch { /* torn line */ }
     }
     return out;
+  }
+
+  getPrefs(owner: string): Prefs {
+    try { return JSON.parse(readFileSync(join(this.userDir(owner), "..", "prefs.json"), "utf8")) as Prefs; } catch { return {}; }
+  }
+  setPref(owner: string, agentId: string, optionId: string, value: string | boolean) {
+    const p = this.getPrefs(owner); (p[agentId] ??= {})[optionId] = value;
+    const f = join(this.userDir(owner), "..", "prefs.json");
+    mkdirSync(join(this.userDir(owner), ".."), { recursive: true, mode: 0o700 });
+    writeFileSync(f + ".tmp", JSON.stringify(p, null, 2), { mode: 0o600 }); renameSync(f + ".tmp", f);
   }
 
   remove(m: SessionMeta) { rmSync(this.dir(m.owner, m.id), { recursive: true, force: true }); }

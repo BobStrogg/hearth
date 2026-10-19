@@ -89,7 +89,18 @@ Add or override agents in `~/.hearth/agents.json`:
 ~/.hearth/users/<sha256(identity)[:16]>/sessions/<uuid>/
   meta.json         { id, owner, agentId, cwd, title, state, agentSessionId, seq, ... }
   transcript.jsonl  {"seq":1,"ts":"...","dir":"out|in|sys","msg":{...raw JSON-RPC or daemon event...}}
+~/.hearth/users/<sha256(identity)[:16]>/prefs.json   last chosen agent settings, per agent (defaults for new sessions)
 ```
+
+## Agent settings (model, mode, …)
+
+Hearth shows whatever settings the agent advertises: ACP session config options (`configOptions` from
+`session/new|load|resume`, changed with `session/set_config_option`, live `config_option_update`), or, for agents that
+only use the older shapes, `modes` (`session/set_mode`, `current_mode_update`) and `models` (`session/set_model`). When
+an agent sends `configOptions` the older shapes are ignored, as the spec recommends. The model and mode appear as small
+pills above the message box; everything else (reasoning level, toggles, …) is behind the ⚙ button, grouped by category.
+Your last choice per agent becomes the default for new sessions with that agent (only choices you make, not changes the
+agent makes on its own); values the agent no longer offers are skipped.
 
 ## API
 
@@ -107,9 +118,9 @@ All under the daemon origin, scoped to the caller's identity.
   agent session, and seeds the transcript through `session/load`, falling back to `session/resume` with no history
 - `WS /ws?session=<id>&since=<seq>`
   - **Server to client:** `replay {items}`, `entry {entry}`, `state`, `permission {id, params}`,
-    `permission_resolved`, `prompt_done {stopReason}`, `error`
-  - **Client to server:** `prompt {content|text}`, `cancel`, `permission {id, optionId|null}`, `setMode {modeId}`,
-    `resume`
+    `permission_resolved`, `prompt_done {stopReason}`, `settings {options}`, `error`
+  - **Client to server:** `prompt {content|text}`, `cancel`, `permission {id, optionId|null}`, `setOption {configId, value}`,
+    `setMode {modeId}`, `resume`
 
 Pending permission requests are re-sent to every client that connects.
 

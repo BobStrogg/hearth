@@ -9,23 +9,48 @@ const LIST = process.env.MOCK_LIST === "1";
 const RESUME = process.env.MOCK_RESUME === "1";
 // Pre-existing "CLI" sessions: { [id]: { cwd, title, updatedAt, history: [{ role: "user"|"agent", text }] } }
 const STORE = process.env.MOCK_STORE ? JSON.parse(readFileSync(process.env.MOCK_STORE, "utf8")) : {};
+const CONFIG = process.env.MOCK_CONFIG === "1";
 const sessions = new Map();
+const MODELS = [{ group: "fast", name: "Fast", options: [{ value: "m-small", name: "Small" }] }, { group: "smart", name: "Smart", options: [{ value: "m-large", name: "Large", description: "Best" }] }];
+function cfg(s) {
+  return [
+    { configId: "model", name: "Model", category: "model", type: "select", currentValue: s.model, options: MODELS },
+    { configId: "mode", name: "Mode", category: "mode", type: "select", currentValue: s.mode, options: [{ value: "code", name: "Code" }, { value: "ask", name: "Ask" }] },
+    // reasoning effort depends on model, like real agents
+    { configId: "effort", name: "Effort", category: "thought_level", type: "select", currentValue: s.effort, options: s.model === "m-large" ? [{ value: "low", name: "Low" }, { value: "high", name: "High" }] : [{ value: "low", name: "Low" }] },
+    { configId: "web", name: "Web search", type: "boolean", currentValue: s.web },
+  ];
+}
+const fresh = (cwd) => ({ cwd, history: [], model: "m-small", mode: "code", effort: "low", web: false, legacyModel: "lm-a", legacyMode: "code" });
 let n = 0;
 
 new acp.AgentSideConnection((conn) => ({
   async initialize() {
     return { protocolVersion: acp.PROTOCOL_VERSION, agentCapabilities: { loadSession: LOAD, sessionCapabilities: { ...(LIST ? { list: {} } : {}), ...(RESUME ? { resume: {} } : {}) } }, authMethods: [], agentInfo: { name: "mock-agent", version: "1" } };
   },
-  async newSession({ cwd }) { const id = `mock-${++n}-${process.pid}`; sessions.set(id, { cwd, history: [] }); return { sessionId: id, modes: { currentModeId: "code", availableModes: [{ id: "code", name: "Code" }, { id: "ask", name: "Ask" }] } }; },
+  async newSession({ cwd }) { const id = `mock-${++n}-${process.pid}`; const st = fresh(cwd); sessions.set(id, st);
+    const legacy = { modes: { currentModeId: "code", availableModes: [{ id: "code", name: "Code" }, { id: "ask", name: "Ask" }] }, models: { currentModelId: "lm-a", availableModels: [{ modelId: "lm-a", name: "Alpha" }, { modelId: "lm-b", name: "Beta" }] } };
+    return { sessionId: id, ...legacy, ...(CONFIG ? { configOptions: cfg(st) } : {}) }; },
+  async setSessionConfigOption({ sessionId, configId, value }) {
+    const s = sessions.get(sessionId);
+    if (!["model", "mode", "effort", "web"].includes(configId)) throw acp.RequestError.invalidParams({ configId });
+    s[configId] = value;
+    if (configId === "model" && value !== "m-large") s.effort = "low";
+    return { configOptions: cfg(s) };
+  },
+  async extMethod(method, params) {
+    if (method === "session/set_model") { sessions.get(params.sessionId).legacyModel = params.modelId; return {}; }
+    throw acp.RequestError.methodNotFound(method);
+  },
   async listSessions({ cwd }) {
     return { sessions: Object.entries(STORE).filter(([, v]) => !cwd || v.cwd === cwd).map(([id, v]) => ({ sessionId: id, cwd: v.cwd, title: v.title, updatedAt: v.updatedAt })) };
   },
   async resumeSession({ sessionId, cwd }) {
     if (!STORE[sessionId] && !sessions.has(sessionId)) throw acp.RequestError.resourceNotFound(sessionId);
-    sessions.set(sessionId, { cwd, history: [] }); return {};
+    sessions.set(sessionId, fresh(cwd)); return {};
   },
   async loadSession({ sessionId, cwd }) {
-    sessions.set(sessionId, { cwd, history: [] });
+    sessions.set(sessionId, fresh(cwd));
     if (STORE[sessionId]) {
       for (const h of STORE[sessionId].history) await conn.sessionUpdate({ sessionId, update: { sessionUpdate: h.role === "user" ? "user_message_chunk" : "agent_message_chunk", content: { type: "text", text: h.text } } });
       return {};
@@ -34,12 +59,15 @@ new acp.AgentSideConnection((conn) => ({
     return {};
   },
   async authenticate() { return {}; },
-  async setSessionMode() { return {}; },
+  async setSessionMode({ sessionId, modeId }) { sessions.get(sessionId).legacyMode = modeId; return {}; },
   async cancel({ sessionId }) { const s = sessions.get(sessionId); if (s) s.cancelled = true; },
   async prompt({ sessionId, prompt }) {
     const s = sessions.get(sessionId); s.cancelled = false;
     const text = prompt.map((c) => c.text ?? "").join(" ");
     const say = (t) => conn.sessionUpdate({ sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: t } } });
+    if (text.includes("whoami")) await say(`model=${CONFIG ? s.model : s.legacyModel} mode=${CONFIG ? s.mode : s.legacyMode} effort=${s.effort} web=${s.web} `);
+    if (text.includes("pushcfg")) { s.mode = "ask"; await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "config_option_update", configOptions: cfg(s) } }); }
+    if (text.includes("pushmode")) { s.legacyMode = "ask"; await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "current_mode_update", currentModeId: "ask" } }); }
     if (text.includes("plan")) {
       await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "plan", entries: [{ content: "Step one", priority: "high", status: "completed" }, { content: "Step two", priority: "medium", status: "in_progress" }] } });
     }

@@ -230,6 +230,7 @@ export class Hearth {
     const last = items.at(-1)?.seq ?? since;
     send({ type: "replay", items, agent: l.meta.agentId, cwd: l.meta.cwd, loadSession: !!l.caps?.agentCapabilities?.loadSession });
     send({ type: "state", state: l.meta.state, title: l.meta.title });
+    send({ type: "settings", options: l.options });
     for (const [pid, p] of l.pending) send({ type: "permission", id: pid, params: p.params });
     replaying = false;
     for (const e of buffered) { const ent = (e as { entry?: { seq: number } }).entry; if (!ent || ent.seq > last) send(e); }
@@ -237,7 +238,7 @@ export class Hearth {
     const ping = setInterval(() => { if (ws.readyState === ws.OPEN) ws.ping(); }, 25000);
     ws.on("close", () => { clearInterval(ping); l.listeners.delete(listener); });
     ws.on("message", async (raw) => {
-      let msg: { type?: string; content?: unknown; id?: string; optionId?: string | null; text?: string; modeId?: string };
+      let msg: { type?: string; content?: unknown; id?: string; optionId?: string | null; text?: string; modeId?: string; configId?: string; value?: unknown };
       try { msg = JSON.parse(String(raw)); } catch { return; }
       try {
         if (msg.type === "prompt") {
@@ -246,7 +247,11 @@ export class Hearth {
             .catch((e) => send({ type: "error", message: String(e?.message ?? e) }));
         } else if (msg.type === "cancel") await l.cancel();
         else if (msg.type === "permission" && msg.id) l.answerPermission(msg.id, msg.optionId ?? null);
-        else if (msg.type === "setMode" && msg.modeId && l.conn) await l.conn.setSessionMode({ sessionId: l.meta.agentSessionId!, modeId: msg.modeId });
+        else if (msg.type === "setOption" && typeof msg.configId === "string") await l.setOption(msg.configId, msg.value);
+        else if (msg.type === "setMode" && msg.modeId) {
+          const o = l.options.find((x) => x.category === "mode");
+          if (o) await l.setOption(o.id, msg.modeId); else if (l.conn) await l.conn.setSessionMode({ sessionId: l.meta.agentSessionId!, modeId: msg.modeId });
+        }
         else if (msg.type === "resume") await l.ensureRunning();
       } catch (e) { send({ type: "error", message: String((e as Error)?.message ?? e) }); }
     });

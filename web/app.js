@@ -129,7 +129,8 @@ class Chat {
       onkeydown: (e) => { if (e.key === "Enter" && !e.shiftKey && !matchMedia("(pointer: coarse)").matches) { e.preventDefault(); this.send(); } } });
     this.sendBtn = h("button", { class: "primary", onclick: () => this.send() }, "Send");
     this.stopBtn = h("button", { class: "danger", hidden: true, onclick: () => this.ws?.send(JSON.stringify({ type: "cancel" })) }, "Stop");
-    $("#view").replaceChildren(h("div", { class: "chat" }, this.log, this.permBox, h("div", { class: "composer" }, this.input, this.stopBtn, this.sendBtn)));
+    this.ctl = h("div", { class: "ctl", hidden: true }); this.options = [];
+    $("#view").replaceChildren(h("div", { class: "chat" }, this.log, this.permBox, h("div", { class: "composer-wrap" }, this.ctl, h("div", { class: "composer" }, this.input, this.stopBtn, this.sendBtn))));
     this.onVis = () => { if (document.visibilityState === "visible" && (!this.ws || this.ws.readyState > 1)) this.connect(); };
     document.addEventListener("visibilitychange", this.onVis);
     this.connect();
@@ -162,9 +163,11 @@ class Chat {
     if (m.type === "replay") { this.replaying = true; if (this.lastSeq === 0) { this.log.replaceChildren(); this.tools.clear(); this.cur = null; } m.items.forEach((e) => this.entry(e)); this.replaying = false; }
     else if (m.type === "entry") this.entry(m.entry);
     else if (m.type === "state") { setHeader(m.title, { back: true, menu: true, status: m.state }); this.status(m.state); this.title = m.title; }
+    else if (m.type === "settings") { this.options = m.options || []; this.renderCtl(); if (!$("#sheet").hidden && this.settingsOpen) this.openSettings(); }
     else if (m.type === "permission") this.addPerm(m);
     else if (m.type === "permission_resolved") { this.perms.get(m.id)?.remove(); this.perms.delete(m.id); }
     else if (m.type === "prompt_done") { this.cur = null; if (m.stopReason !== "end_turn") this.note(`Stopped: ${m.stopReason}`); }
+    else if (m.type === "error" && /setting|config|mode|model/i.test(m.message) && this.options.length) { this.renderCtl(); this.note(m.message, "err"); }
     else if (m.type === "error") this.note(/auth/i.test(m.message) ? `${m.message}. Sign in to this agent once on the computer itself (for example run "claude" then /login, or "grok login").` : m.message, "err");
     if (atBottom || m.type === "replay") this.log.scrollTop = this.log.scrollHeight;
   }
@@ -244,6 +247,39 @@ class Chat {
     t.el.replaceChildren(h("summary", { class: d.status || "" }, `${icon} ${d.title || d.kind || "Tool"}`), body);
     t.el.open = open || (d.content || []).some((c) => c.type === "diff");
   }
+  setOpt(o, value) { this.ws?.readyState === 1 && this.ws.send(JSON.stringify({ type: "setOption", configId: o.id, value })); }
+  /** Model and mode as compact pills by the composer; everything else behind the gear. */
+  renderCtl() {
+    const opts = this.options;
+    const pill = (o) => {
+      const sel = h("select", { class: "pillsel", "aria-label": o.name, title: o.description || o.name, onchange: () => this.setOpt(o, sel.value) },
+        selectChoices(o));
+      sel.value = o.value; return sel;
+    };
+    const main = ["model", "mode"].map((c) => opts.find((o) => o.category === c && o.type === "select")).filter(Boolean);
+    const rest = opts.filter((o) => !main.includes(o));
+    this.ctl.replaceChildren(...main.map(pill),
+      ...(rest.length ? [h("button", { class: "pillbtn", "aria-label": "More settings", title: "More settings", onclick: () => this.openSettings() }, `⚙︎ ${rest.length}`)] : []));
+    this.ctl.hidden = !opts.length;
+  }
+  openSettings() {
+    this.settingsOpen = true;
+    const sheet = $("#sheet"); sheet.hidden = false;
+    const groups = new Map();
+    const label = { model: "Model", mode: "Mode", thought_level: "Reasoning", model_config: "Model settings" };
+    for (const o of this.options) { const k = o.category ? (label[o.category] ?? o.category.replace(/^_/, "").replace(/_/g, " ")) : "Other"; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(o); }
+    const row = (o) => {
+      let ctl;
+      if (o.type === "boolean") { ctl = h("input", { type: "checkbox", class: "toggle", checked: !!o.value, "aria-label": o.name, onchange: () => this.setOpt(o, ctl.checked) }); }
+      else { ctl = h("select", { "aria-label": o.name, onchange: () => this.setOpt(o, ctl.value) }, selectChoices(o)); ctl.value = o.value; }
+      const cur = o.type === "select" ? o.choices?.find((c) => c.value === o.value) : null;
+      return h("div", { class: "opt" }, h("div", { class: "opt-l" }, h("div", {}, o.name), (o.description || cur?.description) ? h("div", { class: "meta" }, cur?.description || o.description) : null), ctl);
+    };
+    sheet.replaceChildren(h("div", { class: "sheet-body" }, h("h2", {}, "Agent settings"),
+      ...[...groups].map(([k, os]) => h("section", { class: "optgroup" }, h("h3", {}, k), os.map(row))),
+      h("p", { class: "muted small" }, "Changes apply to this session and become the default for new sessions with this agent."),
+      h("button", { onclick: () => { sheet.hidden = true; this.settingsOpen = false; } }, "Done")));
+  }
   addPerm(m) {
     if (this.perms.has(m.id)) return;
     const p = m.params;
@@ -252,6 +288,13 @@ class Chat {
         onclick: () => this.ws.send(JSON.stringify({ type: "permission", id: m.id, optionId: o.optionId })) }, o.name))));
     this.perms.set(m.id, el); this.permBox.append(el);
   }
+}
+
+function selectChoices(o) {
+  const grouped = new Map();
+  for (const c of o.choices || []) { const g = c.group || ""; if (!grouped.has(g)) grouped.set(g, []); grouped.get(g).push(c); }
+  const opt = (c) => h("option", { value: c.value, title: c.description || "" }, c.name);
+  return [...grouped].flatMap(([g, cs]) => g ? [h("optgroup", { label: g }, cs.map(opt))] : cs.map(opt));
 }
 
 function diffView(a, b) {
@@ -278,7 +321,7 @@ function diffView(a, b) {
 
 // ---------- session menu ----------
 $("#menu").onclick = () => {
-  if (!chat) return;
+  if (!chat) return; chat.settingsOpen = false;
   const sheet = $("#sheet"); sheet.hidden = false; const id = chat.id;
   const name = h("input", { value: chat.title || "" });
   sheet.replaceChildren(h("div", { class: "sheet-body" }, h("h2", {}, "Session"),
@@ -288,7 +331,7 @@ $("#menu").onclick = () => {
     h("button", { class: "danger", onclick: async () => { if (confirm("Stop the agent and delete all history for this session?")) { await api("DELETE", `/api/sessions/${id}?purge=1`); sheet.hidden = true; location.hash = "#/"; } } }, "Terminate & delete history"),
     h("button", { onclick: () => { sheet.hidden = true; } }, "Close")));
 };
-$("#sheet").addEventListener("click", (e) => { if (e.target.id === "sheet") e.target.hidden = true; });
+$("#sheet").addEventListener("click", (e) => { if (e.target.id === "sheet") { e.target.hidden = true; if (chat) chat.settingsOpen = false; } });
 
 // ---------- routing ----------
 async function route() {

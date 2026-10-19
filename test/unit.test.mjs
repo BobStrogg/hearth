@@ -78,3 +78,16 @@ test("file fallback lists Claude and Codex sessions read-only", async () => {
   assert.deepEqual([x.sessionId, x.cwd, x.title], ["cx1", "/q", "hello codex"]);
   assert.equal(fileFallback("grok", home), null);
 });
+
+test("settings normalize: configOptions win, group/groupId, unknown types skipped, legacy fallback", async () => {
+  const { normalize, applyUpdate } = await import("../dist/settings.js");
+  const o = normalize({ configOptions: [
+    { configId: "m", name: "Model", category: "model", type: "select", currentValue: "b", options: [{ group: "g1", name: "G1", options: [{ value: "a", name: "A" }] }, { groupId: "g2", name: "G2", options: [{ value: "b", name: "B" }] }] },
+    { configId: "x", name: "X", type: "_future", currentValue: 1 },
+  ], modes: { currentModeId: "c", availableModes: [{ id: "c", name: "C" }] } });
+  assert.equal(o.length, 1); assert.deepEqual(o[0].choices.map((c) => c.group), ["G1", "G2"]);
+  const l = normalize({ modes: { currentModeId: "c", availableModes: [{ id: "c", name: "C" }] }, models: { currentModelId: "z", availableModels: [{ modelId: "z", name: "Z" }] } });
+  assert.deepEqual(l.map((x) => [x.category, x.via]), [["mode", "mode"], ["model", "model"]]);
+  assert.equal(applyUpdate({}, { sessionUpdate: "agent_message_chunk" }), null);
+  assert.equal(normalize({}).length, 0);
+});

@@ -19,6 +19,7 @@ before(async () => {
     { id: "mock", name: "Mock", detect: [process.execPath], command: process.execPath, args: [MOCK] },
     { id: "mockfull", name: "Mock full", detect: [process.execPath], command: process.execPath, args: [MOCK], env: { MOCK_LOAD_SESSION: "1", MOCK_LIST: "1", MOCK_RESUME: "1", MOCK_STORE: join(dataDir, "store.json") } },
     { id: "mockresume", name: "Mock resume", detect: [process.execPath], command: process.execPath, args: [MOCK], env: { MOCK_LIST: "1", MOCK_RESUME: "1", MOCK_STORE: join(dataDir, "store.json") } },
+    { id: "mockcfg", name: "Mock config", detect: [process.execPath], command: process.execPath, args: [MOCK], env: { MOCK_CONFIG: "1" } },
     { id: "mockload", name: "Mock+load", detect: [process.execPath], command: process.execPath, args: [MOCK], env: { MOCK_LOAD_SESSION: "1" } },
   ]));
   writeFileSync(join(dataDir, "store.json"), JSON.stringify({
@@ -236,4 +237,64 @@ test("streaming: message and thought chunks reach the browser before the turn en
   assert.ok(done - msg[0][1] >= 400, `first chunk only ${done - msg[0][1]}ms before done`);
   assert.ok(msg[1][1] - msg[0][1] >= 100, "chunks were batched");
   s.close(); await api(U, "DELETE", `/api/sessions/${c.json.id}`);
+});
+
+const settled = (s, pred) => s.until((m) => m.type === "settings" && pred(m.options));
+const val = (opts, id) => opts.find((o) => o.id === id)?.value;
+
+test("config options: select/boolean, grouped choices, dependent options, agent pushes, reconnect, per-agent defaults", async () => {
+  const u = "cfg@example.com";
+  for (const x of [u, "other@example.com"]) await api(x, "POST", "/api/unlock", { password: PW });
+  const c = await api(u, "POST", "/api/sessions", { agentId: "mockcfg", cwd: join(root, "proj") });
+  const s = await ws(u, c.json.id);
+  const first = await settled(s, (o) => o.length === 4);
+  const model = first.options.find((o) => o.id === "model");
+  assert.equal(model.category, "model"); assert.equal(model.via, "config");
+  assert.deepEqual(model.choices.map((x) => [x.value, x.group]), [["m-small", "Fast"], ["m-large", "Smart"]]);
+  assert.ok(!first.options.some((o) => o.via !== "config"), "legacy modes/models are ignored when configOptions exist");
+  s.send(JSON.stringify({ type: "setOption", configId: "model", value: "m-large" }));
+  await settled(s, (o) => val(o, "model") === "m-large" && o.find((x) => x.id === "effort").choices.length === 2);
+  s.send(JSON.stringify({ type: "setOption", configId: "effort", value: "high" }));
+  s.send(JSON.stringify({ type: "setOption", configId: "web", value: true }));
+  await settled(s, (o) => val(o, "web") === true && val(o, "effort") === "high");
+  s.send(JSON.stringify({ type: "setOption", configId: "model", value: "nope" }));
+  await s.until((m) => m.type === "error" && /invalid value/.test(m.message));
+  s.send(JSON.stringify({ type: "prompt", text: "whoami pushcfg" }));
+  await settled(s, (o) => val(o, "mode") === "ask");
+  await s.until((m) => m.type === "prompt_done");
+  assert.match(text(h.store.read(h.live.get(c.json.id).meta)), /model=m-large mode=code effort=high web=true/);
+  s.close();
+  // reconnect gets current state immediately
+  const s2 = await ws(u, c.json.id); const r = await s2.until((m) => m.type === "settings");
+  assert.equal(val(r.options, "mode"), "ask"); assert.equal(val(r.options, "web"), true); s2.close();
+  // a new session with this agent starts with the remembered choices (model applied before effort)
+  const c2 = await api(u, "POST", "/api/sessions", { agentId: "mockcfg", cwd: join(root, "proj") });
+  const s3 = await ws(u, c2.json.id);
+  await settled(s3, (o) => val(o, "model") === "m-large" && val(o, "effort") === "high" && val(o, "web") === true && val(o, "mode") === "code"); // agent-pushed mode is not a user preference
+  // another user is unaffected
+  const c3 = await api("other@example.com", "POST", "/api/sessions", { agentId: "mockcfg", cwd: join(root, "proj") });
+  const s4 = await ws("other@example.com", c3.json.id);
+  const o4 = await settled(s4, (o) => o.length === 4); await s4.until((m) => m.type === "state" && m.state === "idle");
+  assert.equal(val(o4.options, "model"), "m-small");
+  s3.close(); s4.close();
+});
+
+test("legacy modes + unstable models: set_mode, set_model, current_mode_update", async () => {
+  const u = "legacy@example.com"; await api(u, "POST", "/api/unlock", { password: PW });
+  const c = await api(u, "POST", "/api/sessions", { agentId: "mock", cwd: join(root, "proj") });
+  const s = await ws(u, c.json.id);
+  const first = await settled(s, (o) => o.length === 2);
+  const mode = first.options.find((o) => o.category === "mode"), model = first.options.find((o) => o.category === "model");
+  assert.equal(mode.via, "mode"); assert.equal(model.via, "model");
+  s.send(JSON.stringify({ type: "setOption", configId: model.id, value: "lm-b" }));
+  await settled(s, (o) => val(o, model.id) === "lm-b");
+  s.send(JSON.stringify({ type: "setOption", configId: mode.id, value: "ask" }));
+  await settled(s, (o) => val(o, mode.id) === "ask");
+  s.send(JSON.stringify({ type: "prompt", text: "whoami" })); await s.until((m) => m.type === "prompt_done");
+  assert.match(text(h.store.read(h.live.get(c.json.id).meta)), /model=lm-b mode=ask/);
+  s.send(JSON.stringify({ type: "setOption", configId: mode.id, value: "code" }));
+  await settled(s, (o) => val(o, mode.id) === "code");
+  s.send(JSON.stringify({ type: "prompt", text: "pushmode" }));
+  await settled(s, (o) => val(o, mode.id) === "ask");
+  s.close();
 });

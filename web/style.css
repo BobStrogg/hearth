@@ -40,6 +40,15 @@ code { font-family:ui-monospace, Menlo, monospace; font-size:.88em; }
 .plan ul { list-style:none; padding:0; margin:.4rem 0 0; } .plan li.completed { color:var(--muted); text-decoration:line-through; } .plan li.in_progress { color:var(--acc); }
 .note { align-self:center; font-size:.8rem; color:var(--muted); text-align:center; }
 .perms { display:flex; flex-direction:column; gap:.5rem; padding:0 .8rem; } .perm { border-color:var(--acc); }
-.composer { display:flex; gap:.5rem; padding:.6rem .8rem calc(.6rem + env(safe-area-inset-bottom)); border-top:1px solid var(--line); align-items:flex-end; }
+.composer-wrap { border-top:1px solid var(--line); }
+.composer { display:flex; gap:.5rem; padding:.6rem .8rem calc(.6rem + env(safe-area-inset-bottom)); align-items:flex-end; }
+.ctl { display:flex; gap:.4rem; padding:.45rem .8rem 0; overflow-x:auto; scrollbar-width:none; } .ctl[hidden] { display:none; }
+.ctl .pillsel, .ctl .pillbtn { min-height:30px; padding:.15rem 1.4rem .15rem .65rem; border-radius:99px; font-size:.8rem; color:var(--muted); max-width:46vw; flex:0 1 auto; text-overflow:ellipsis; white-space:nowrap; overflow:hidden; }
+.ctl .pillsel { appearance:none; -webkit-appearance:none; background:var(--card) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='5'%3E%3Cpath d='M0 0l4 5 4-5z' fill='%239aa1ad'/%3E%3C/svg%3E") no-repeat right .55rem center; }
+.ctl .pillbtn { padding-right:.65rem; flex:0 0 auto; }
+.optgroup h3 { font-size:.8rem; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); margin:.6rem 0 .2rem; }
+.opt { display:flex; align-items:center; justify-content:space-between; gap:.8rem; padding:.45rem 0; border-bottom:1px solid var(--line); }
+.opt-l { min-width:0; } .opt .meta { color:var(--muted); font-size:.8rem; } .opt select { max-width:55%; }
+.toggle { width:1.4rem; height:1.4rem; min-height:0; accent-color:var(--acc); } .small { font-size:.8rem; }
 .composer textarea { flex:1; resize:none; max-height:160px; }
 .dirs li.ext { cursor:default; } .dirs li.ext .meta { color:var(--muted); font-size:.85rem; }
