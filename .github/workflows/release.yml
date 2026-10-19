@@ -46,8 +46,7 @@ jobs:
       - name: Build npm package
         run: |
           npm pack
-          VERSION=${GITHUB_REF_NAME#v}
-          mv hearth-acp-*.tgz "hearth-acp-${VERSION}.tgz"
+          test -f "hearth-acp-${GITHUB_REF_NAME#v}.tgz"
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
