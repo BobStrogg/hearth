@@ -46,20 +46,26 @@ export const BUILTIN_AGENTS: AgentDef[] = [
 
 export function searchPath(): string {
   const h = homedir();
-  const extra = [join(h, ".local/bin"), join(h, ".grok/bin"), join(h, ".npm-global/bin"), join(h, ".bun/bin"),
-    join(h, ".cargo/bin"), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
+  const extra = process.platform === "win32"
+    ? [join(process.env.APPDATA || join(h, "AppData", "Roaming"), "npm"), join(h, ".local", "bin"), join(h, ".bun", "bin"), join(h, ".cargo", "bin")]
+    : [join(h, ".local/bin"), join(h, ".grok/bin"), join(h, ".npm-global/bin"), join(h, ".bun/bin"),
+      join(h, ".cargo/bin"), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
   const parts = (process.env.PATH ?? "").split(delimiter).concat(extra);
   return [...new Set(parts.filter(Boolean))].join(delimiter);
 }
 
 export function which(bin: string, path = searchPath()): string | null {
-  if (bin.includes("/")) return existsSync(bin) ? bin : null;
+  if (bin.includes("/") || (process.platform === "win32" && bin.includes("\\"))) return existsSync(bin) ? bin : null;
+  // Windows: also try PATHEXT (npm installs agents as .cmd shims)
+  const exts = process.platform === "win32" ? ["", ...(process.env.PATHEXT || ".EXE;.CMD;.BAT;.COM").split(";").map((e) => e.toLowerCase())] : [""];
   for (const dir of path.split(delimiter)) {
-    const p = join(dir, bin);
-    if (existsSync(p)) return p;
+    if (!dir) continue;
+    for (const e of exts) { const p = join(dir, bin + e); if (existsSync(p)) return p; }
   }
   return null;
 }
+/** spawn options that make npm-style .cmd shims start on Windows (a no-op elsewhere). */
+export const winShell = (): { shell?: boolean } => (process.platform === "win32" ? { shell: true } : {});
 
 export function loadAgents(file?: string): AgentDef[] {
   const list = new Map(BUILTIN_AGENTS.map((a) => [a.id, a]));
@@ -85,7 +91,7 @@ export function probe(agents: AgentDef[]): ProbeResult[] {
 
 /** Deep probe: start the agent and run `initialize`, then kill it. */
 export async function deepProbe(a: AgentDef, timeoutMs = 20000): Promise<ProbeResult["deep"]> {
-  const child = spawn(a.command, a.args, { stdio: ["pipe", "pipe", "ignore"], env: { ...process.env, PATH: searchPath(), ...a.env } });
+  const child = spawn(a.command, a.args, { stdio: ["pipe", "pipe", "ignore"], env: { ...process.env, PATH: searchPath(), ...a.env }, ...winShell() });
   try {
     const stream = acp.ndJsonStream(Writable.toWeb(child.stdin) as WritableStream<Uint8Array>, Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>);
     const conn = new acp.ClientSideConnection(() => ({ requestPermission: async () => ({ outcome: { outcome: "cancelled" } }), sessionUpdate: async () => {} }), stream);

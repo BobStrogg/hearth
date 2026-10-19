@@ -53,7 +53,37 @@ async function showList() {
     h("div", { class: "meta" }, `${name(s.agentId)} · ${short(s.cwd)} · ${ago(s.lastActivity)}`)));
   $("#view").replaceChildren(
     h("div", { class: "toolbar" }, h("span", { class: "muted" }, me.user), h("div", { class: "row" }, h("button", { onclick: importSessions }, "Import existing"), h("button", { class: "primary", onclick: newSession }, "+ New session"))),
-    items.length ? h("ul", { class: "list" }, items) : h("p", { class: "muted center" }, "No sessions yet."));
+    items.length ? h("ul", { class: "list" }, items) : h("p", { class: "muted center" }, "No sessions yet."), versionBar());
+}
+
+// ---------- version / update ----------
+function versionBar() {
+  const bar = h("div", { class: "verbar muted small" });
+  const show = (v) => {
+    const kids = [`Hearth ${v.version}`];
+    if (v.updating) kids.push(" · updating…");
+    else if (v.updateAvailable) {
+      kids.push(" · ", h("strong", {}, `${v.latest} available`));
+      if (v.canApply) kids.push(" ", h("button", { class: "pillbtn", onclick: async (e) => {
+        e.target.disabled = true; e.target.textContent = "Updating…";
+        try { await api("POST", "/api/update"); waitForVersion(v.version, bar); } catch (x) { e.target.textContent = x.message; }
+      } }, "Update now"));
+      else kids.push(h("div", {}, `Update with: ${v.how}`));
+    }
+    bar.replaceChildren(...kids);
+  };
+  api("GET", "/api/version?check=1").then(show).catch(() => {});
+  return bar;
+}
+/** After "Update now", the daemon restarts: poll until a different version answers, then reload. */
+function waitForVersion(old, bar) {
+  let n = 0;
+  const tick = async () => {
+    n++;
+    try { const r = await fetch("/healthz", { cache: "no-store" }); const j = await r.json(); if (j.version && j.version !== old) { location.reload(); return; } } catch { /* restarting */ }
+    if (n < 90) setTimeout(tick, 2000); else bar.textContent = "The update didn't finish; see `hearth service logs` on the computer.";
+  };
+  setTimeout(tick, 3000);
 }
 
 // ---------- new session sheet ----------

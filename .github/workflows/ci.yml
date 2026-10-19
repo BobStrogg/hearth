@@ -1,0 +1,44 @@
+name: CI
+on:
+  push: { branches: [main] }
+  pull_request:
+  workflow_dispatch:
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node: [20, 22]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: ${{ matrix.node }} }
+      - run: npm ci
+      - run: npm test
+      - name: service install (Linux systemd --user)
+        if: runner.os == 'Linux'
+        run: |
+          export HEARTH_HOME="$HOME/.hearth-ci" HEARTH_DATA_DIR="$HOME/.hearth-ci" HEARTH_PORT=17682 HEARTH_PASSWORD=off HEARTH_IDENTITY=single:ci
+          node dist/main.js service install --port 17682
+          curl -fs http://127.0.0.1:17682/healthz
+          node dist/main.js doctor --offline
+          node dist/main.js service uninstall
+  windows:
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: npm ci
+      - run: npm test
+        continue-on-error: true
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: gitleaks/gitleaks-action@v2
+        env: { GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} }

@@ -62,3 +62,4 @@ figcaption { margin-top:.2rem; font-size:.75rem; }
 .lightbox { position:fixed; inset:0; z-index:20; background:#000d; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:.6rem; padding:calc(.8rem + env(safe-area-inset-top)) .8rem calc(.8rem + env(safe-area-inset-bottom)); cursor:zoom-out; overscroll-behavior:contain; touch-action:pinch-zoom; }
 .lightbox img { max-width:100%; max-height:calc(100dvh - 6rem); object-fit:contain; border-radius:6px; }
 .lb-actions { display:flex; gap:.5rem; } .lb-actions .imgact { font-size:.9rem; padding:.35rem .9rem; color:var(--fg); background:#222a; border-color:#fff4; }
+.verbar { text-align:center; padding:.4rem .8rem 1.2rem; } .verbar .pillbtn { min-height:28px; padding:.1rem .7rem; border-radius:99px; font-size:.8rem; }

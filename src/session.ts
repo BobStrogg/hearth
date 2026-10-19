@@ -6,7 +6,7 @@ import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
 import { createRequire } from "node:module";
 const HEARTH_VERSION: string = (createRequire(import.meta.url)("../package.json") as { version: string }).version;
-import { type AgentDef, searchPath } from "./agents.js";
+import { type AgentDef, searchPath, winShell } from "./agents.js";
 import type { SessionMeta, Store, TranscriptEntry } from "./store.js";
 import { absorb, applyUpdate, MODE_ID, MODEL_ID, normalize, setLocal, valid, type RawSettings, type UiOption } from "./settings.js";
 
@@ -24,6 +24,7 @@ export interface Term { buf: Buffer; truncated: boolean; exit?: { exitCode: numb
 
 /** The user's login shell (launchd gives daemons a minimal environment). */
 export function userShell(): string {
+  if (process.platform === "win32") return process.env.ComSpec || "cmd.exe";
   const sh = process.env.SHELL;
   if (sh && existsSync(sh)) return sh;
   return process.platform === "darwin" ? "/bin/zsh" : existsSync("/bin/bash") ? "/bin/bash" : "/bin/sh";
@@ -48,7 +49,7 @@ export function startTerminal(command: string, args: string[], cwd: string, env:
   const add = (b: Buffer) => { t.buf = Buffer.concat([t.buf, b]); if (t.buf.length > limit) { t.buf = t.buf.subarray(t.buf.length - limit); t.truncated = true; } };
   t.done = new Promise((res) => {
     const run = (shell: boolean) => {
-      proc = shell ? spawn(userShell(), ["-lc", line], { cwd, env: fullEnv, stdio: ["ignore", "pipe", "pipe"], detached: true })
+      proc = shell ? spawn(userShell(), process.platform === "win32" ? ["/d", "/s", "/c", line] : ["-lc", line], { cwd, env: fullEnv, stdio: ["ignore", "pipe", "pipe"], detached: true })
         : spawn(command, args, { cwd, env: fullEnv, stdio: ["ignore", "pipe", "pipe"], detached: true });
       proc.stdout!.on("data", add); proc.stderr!.on("data", add);
       let failed = false;
@@ -164,7 +165,7 @@ export class LiveSession {
   private async start(skipLoad = false): Promise<void> {
     const child = spawn(this.agent.command, this.agent.args, {
       cwd: this.meta.cwd, stdio: ["pipe", "pipe", "pipe"], detached: true,
-      env: { ...process.env, PATH: searchPath(), ...this.agent.env },
+      env: { ...process.env, PATH: searchPath(), ...this.agent.env }, ...winShell(),
     });
     this.child = child;
     let tail = "";

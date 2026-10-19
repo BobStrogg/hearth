@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.0
+- Cross-platform packaging. `hearth service install|uninstall|start|stop|restart|status|logs` behind a common
+  ServiceManager: LaunchAgent (or `--system` LaunchDaemon) on macOS, systemd `--user` (or `--system`) on Linux, Task
+  Scheduler on Windows (experimental). Migrates the old `run.sh` LaunchAgent in place.
+- `hearth doctor` checks Node, agents, port, config, the service, Cloudflare Access and updates.
+- `hearth update` (and optional `HEARTH_AUTO_UPDATE=on`) pulls a verified GitHub Release, restarts the service and rolls
+  back if `/healthz` fails. The web UI shows the version and an "Update now" button.
+- Config and data use XDG on Linux and `%APPDATA%` on Windows; an existing `~/.hearth` is kept. `hearth --version`.
+- npm package `hearth-acp`, one-liner installer, Homebrew tap (`BobStrogg/homebrew-hearth`), single-file binaries
+  (Node SEA) attached to GitHub Releases with `SHA256SUMS`. CI on macOS + Linux (+ Windows best-effort); gitleaks on
+  every push/PR.
+- Windows: path-safe `which` (PATHEXT), `shell: true` for agent spawn, `cmd.exe` for shell terminals.
+
 ## 0.3.3
 - Inline images. ACP `image` blocks (base64 `data` or `uri`), `resource_link` and embedded `resource` blocks with an
   `image/*` type, images inside tool results (including MCP-style `rawOutput.content`), and markdown images

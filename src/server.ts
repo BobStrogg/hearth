@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { homedir } from "node:os";
 import { basename, extname, join, resolve } from "node:path";
@@ -7,6 +7,11 @@ import { WebSocketServer, type WebSocket } from "ws";
 import { type AgentDef, deepProbe, loadAgents, probe } from "./agents.js";
 import { Auth, type AuthConfig } from "./auth.js";
 import { listExternal } from "./importer.js";
+import { installInfo, isSea } from "./install-info.js";
+import { dataDir } from "./platform.js";
+import { pidFile } from "./service.js";
+import { cmpVer, latestRelease, plan, type Release, spawnUpdater } from "./update.js";
+import { VERSION } from "./version.js";
 import { LiveSession, within } from "./session.js";
 const HISTORY_TURNS = 8;
 import { dedupeFanout, type SessionMeta, Store } from "./store.js";
@@ -17,17 +22,19 @@ export interface Config extends AuthConfig {
   roots: string[];
   agentsFile?: string;
   webDir: string;
+  autoUpdate: boolean;
 }
 
 export function configFromEnv(env = process.env): Config {
   const port = Number(env.HEARTH_PORT ?? 7682);
-  const dataDir = env.HEARTH_DATA_DIR ?? join(homedir(), ".hearth");
+  const dataDir = dataDirFor(env);
   const list = (v?: string) => (v ?? "").split(",").map((s) => s.trim()).filter(Boolean);
   return {
     port, bind: env.HEARTH_BIND ?? "127.0.0.1", dataDir,
     roots: list(env.HEARTH_ROOTS).length ? list(env.HEARTH_ROOTS).map((r) => resolve(r)) : [homedir()],
     agentsFile: env.HEARTH_AGENTS_FILE ?? join(dataDir, "agents.json"),
-    webDir: env.HEARTH_WEB_DIR ?? fileURLToPath(new URL("../web", import.meta.url)),
+    webDir: env.HEARTH_WEB_DIR ?? defaultWebDir(),
+    autoUpdate: /^(on|1|true|yes)$/i.test(env.HEARTH_AUTO_UPDATE ?? ""),
     identity: env.HEARTH_IDENTITY ?? "single:",
     cfTeamDomain: env.HEARTH_CF_TEAM_DOMAIN, cfAud: env.HEARTH_CF_AUD,
     allowedUsers: list(env.HEARTH_ALLOWED_USERS).map((u) => u.toLowerCase()),
@@ -37,6 +44,22 @@ export function configFromEnv(env = process.env): Config {
   };
 }
 
+const dataDirFor = (env: NodeJS.ProcessEnv) => dataDir(env);
+function defaultWebDir(): string { try { return fileURLToPath(new URL("../web", import.meta.url)); } catch { return ""; } }
+/** Web assets: from web/ on disk, or embedded in the single-file binary. */
+function webAsset(webDir: string, rel: string): Buffer | null {
+  if (isSea()) {
+    try {
+      // Only reached inside the single-file binary (a CJS bundle, where `require` exists).
+      const sea = require("node:sea") as { getAsset(k: string): ArrayBuffer };
+      return Buffer.from(sea.getAsset(`web/${rel}`));
+    } catch { return null; }
+  }
+  if (!webDir) return null;
+  const file = resolve(webDir, rel);
+  if (!within(webDir, file) || !statSync(file, { throwIfNoEntry: false })?.isFile()) return null;
+  return readFileSync(file);
+}
 const MIME: Record<string, string> = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".json": "application/json", ".webmanifest": "application/manifest+json" };
 const SEC_HEADERS = {
   "x-content-type-options": "nosniff", "referrer-policy": "no-referrer", "x-frame-options": "DENY",
@@ -64,6 +87,8 @@ export class Hearth {
   server = createServer((q, s) => { this.http(q, s).catch((e) => this.send(s, 500, { error: String(e?.message ?? e) })); });
   wss = new WebSocketServer({ noServer: true, maxPayload: 8 * 1024 * 1024, perMessageDeflate: false });
   private deepCache = new Map<string, unknown>();
+  private rel: { at: number; release?: Release; error?: string } = { at: 0 };
+  private updating = 0; private pendingSince = 0; private autoTimer?: NodeJS.Timeout;
 
   constructor(readonly cfg: Config) {
     this.store = new Store(cfg.dataDir);
@@ -75,9 +100,46 @@ export class Hearth {
   }
 
   listen(): Promise<number> {
-    return new Promise((res) => this.server.listen(this.cfg.port, this.cfg.bind, () => res((this.server.address() as { port: number }).port)));
+    return new Promise((res) => this.server.listen(this.cfg.port, this.cfg.bind, () => {
+      if (process.env.HEARTH_SERVICE) { try { writeFileSync(pidFile(), String(process.pid)); } catch { /* best effort */ } }
+      if (this.cfg.autoUpdate) this.scheduleAuto(10 * 60_000);
+      res((this.server.address() as { port: number }).port);
+    }));
+  }
+  /** Cached GitHub release lookup (at most hourly unless forced). */
+  async release(force = false): Promise<Release | undefined> {
+    if (!force && Date.now() - this.rel.at < 3600_000) return this.rel.release;
+    try { this.rel = { at: Date.now(), release: await latestRelease(8000) }; } catch (e) { this.rel = { at: Date.now(), release: this.rel.release, error: String((e as Error).message) }; }
+    return this.rel.release;
+  }
+  /** True while any agent is mid-turn: restarting then would cut it off. */
+  busy() { return [...this.live.values()].some((l) => l.meta.state === "running" || l.pending.size > 0); }
+  private async versionInfo(check: boolean) {
+    const rel = check ? await this.release() : this.rel.release;
+    const info = installInfo(); const p = plan(info);
+    return { version: VERSION, latest: rel?.version ?? null, releaseUrl: rel?.url ?? null, updateAvailable: !!rel && cmpVer(rel.version, VERSION) > 0,
+      method: info.method, canApply: p.canApply && !!process.env.HEARTH_SERVICE, how: p.how, autoUpdate: this.cfg.autoUpdate, updating: Date.now() - this.updating < 5 * 60_000, checkError: this.rel.error ?? null };
+  }
+  /** Auto-update: daily check; restart only when no agent is mid-turn, but don't wait more than 24h. */
+  private scheduleAuto(ms: number) {
+    clearTimeout(this.autoTimer);
+    this.autoTimer = setTimeout(async () => {
+      try {
+        const v = await this.versionInfo(true);
+        if (v.updateAvailable && v.canApply) {
+          this.pendingSince ||= Date.now();
+          if (!this.busy() || Date.now() - this.pendingSince > 24 * 3600_000) { this.updating = Date.now(); spawnUpdater(); return this.scheduleAuto(24 * 3600_000); }
+          return this.scheduleAuto(15 * 60_000); // busy: try again soon
+        }
+        this.pendingSince = 0;
+      } catch { /* try again tomorrow */ }
+      this.scheduleAuto(24 * 3600_000 + Math.floor(Math.random() * 3600_000));
+    }, ms);
+    this.autoTimer.unref();
   }
   async close() {
+    clearTimeout(this.autoTimer);
+    if (process.env.HEARTH_SERVICE) { try { if (readFileSync(pidFile(), "utf8").trim() === String(process.pid)) rmSync(pidFile(), { force: true }); } catch { /* none */ } }
     await Promise.all([...this.live.values()].map((l) => l.shutdown().catch(() => {})));
     for (const c of this.wss.clients) c.terminate();
     this.wss.close(); this.server.closeAllConnections(); await new Promise((r) => this.server.close(r));
@@ -114,6 +176,7 @@ export class Hearth {
   private async http(q: IncomingMessage, s: ServerResponse) {
     if (!this.auth.hostOk(q)) return this.send(s, 421, { error: "host not allowed" });
     const url = new URL(q.url ?? "/", "http://x");
+    if (url.pathname === "/healthz") return this.send(s, 200, { ok: true, version: VERSION });
     if (!url.pathname.startsWith("/api/")) return this.static(url.pathname, s);
 
     const who = await this.auth.identify(q);
@@ -129,6 +192,16 @@ export class Hearth {
     }
     if (!this.auth.unlocked(q, who)) return this.send(s, 423, { error: "locked" });
 
+    if (url.pathname === "/api/version" && q.method === "GET") return this.send(s, 200, await this.versionInfo(url.searchParams.get("check") === "1"));
+    if (url.pathname === "/api/update" && q.method === "POST") {
+      // Runs the fixed `hearth update --yes` command as a detached process; takes no input.
+      const v = await this.versionInfo(true);
+      if (!v.updateAvailable) return this.send(s, 409, { error: "already up to date" });
+      if (!v.canApply) return this.send(s, 409, { error: process.env.HEARTH_SERVICE ? `update this install with: ${v.how}` : "Hearth isn't running as a service: run `hearth update` in a terminal" });
+      if (v.updating) return this.send(s, 202, { ok: true, already: true });
+      this.updating = Date.now(); spawnUpdater();
+      return this.send(s, 202, { ok: true, to: v.latest });
+    }
     if (url.pathname === "/api/agents") {
       const deep = url.searchParams.get("deep");
       if (deep) {
@@ -248,10 +321,10 @@ export class Hearth {
 
   private static(path: string, s: ServerResponse) {
     const rel = path === "/" ? "index.html" : path.slice(1);
-    const file = resolve(this.cfg.webDir, rel);
-    if (!within(this.cfg.webDir, file) || !statSync(file, { throwIfNoEntry: false })?.isFile()) { s.writeHead(404, SEC_HEADERS); return s.end("not found"); }
-    s.writeHead(200, { "content-type": MIME[extname(file)] ?? "application/octet-stream", "cache-control": "no-cache", ...SEC_HEADERS });
-    s.end(readFileSync(file));
+    const body = /^[\w.-]+$/.test(rel) ? webAsset(this.cfg.webDir, rel) : null;
+    if (!body) { s.writeHead(404, SEC_HEADERS); return s.end("not found"); }
+    s.writeHead(200, { "content-type": MIME[extname(rel)] ?? "application/octet-stream", "cache-control": "no-cache", ...SEC_HEADERS });
+    s.end(body);
   }
 
   private async upgrade(req: IncomingMessage, sock: import("node:net").Socket, head: Buffer) {
