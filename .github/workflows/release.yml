@@ -12,23 +12,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            target: linux-x64
-          - os: ubuntu-24.04-arm
-            target: linux-arm64
-          - os: macos-13
-            target: darwin-x64
-          - os: macos-14
-            target: darwin-arm64
-          - os: windows-latest
-            target: win-x64
-            continue: true
+          - { os: ubuntu-latest, target: linux-x64 }
+          - { os: ubuntu-24.04-arm, target: linux-arm64 }
+          - { os: macos-13, target: darwin-x64 }
+          - { os: macos-14, target: darwin-arm64 }
+          - { os: windows-latest, target: win-x64 }
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.continue || false }}
+    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        with: { node-version: 22 }
+        with:
+          node-version: 22
       - run: npm ci
       - run: npm test
         if: runner.os != 'Windows'
@@ -44,7 +39,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        with: { node-version: 22, registry-url: https://registry.npmjs.org }
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
       - run: npm ci
       - name: Build npm package
         run: |
@@ -52,7 +49,8 @@ jobs:
           VERSION=${GITHUB_REF_NAME#v}
           mv hearth-acp-*.tgz "hearth-acp-${VERSION}.tgz"
       - uses: actions/download-artifact@v4
-        with: { path: artifacts }
+        with:
+          path: artifacts
       - name: Collect binaries and checksums
         run: |
           VERSION=${GITHUB_REF_NAME#v}
@@ -63,7 +61,8 @@ jobs:
           cat dist-rel/SHA256SUMS
       - name: Publish to npm
         continue-on-error: true
-        env: { NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }} }
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           if [ -z "${NODE_AUTH_TOKEN:-}" ]; then echo "NPM_TOKEN not set: skipping npm publish"; exit 0; fi
           npm publish --provenance --access public
@@ -75,7 +74,8 @@ jobs:
             dist-rel/*
       - name: Bump Homebrew tap
         continue-on-error: true
-        env: { HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }} }
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
           if [ -z "${HOMEBREW_TAP_TOKEN:-}" ]; then echo "HOMEBREW_TAP_TOKEN not set: skipping tap bump"; exit 0; fi
           VERSION=${GITHUB_REF_NAME#v}
@@ -106,7 +106,6 @@ jobs:
             end
           end
           RB
-          # unindent (heredoc above was indented by the action)
           sed -i 's/^          //' tap/Formula/hearth.rb
           cd tap && git config user.name "hearth-release" && git config user.email "hearth-release@users.noreply.github.com"
           cd tap && git add Formula/hearth.rb && git commit -m "hearth ${VERSION}" && git push
