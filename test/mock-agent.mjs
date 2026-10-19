@@ -109,7 +109,7 @@ new acp.AgentSideConnection((conn) => ({
     }
     if (text.includes("shellcmd")) {
       // Devin-style: a whole shell line as `command`, no args, relative cwd; plus an args-style call and a missing binary.
-      const a = await conn.createTerminal({ sessionId, command: "echo $((6*7)) | tr 4 X && pwd", cwd: ".", outputByteLimit: 64 });
+      const a = await conn.createTerminal({ sessionId, command: "echo $((6*7)) | tr 4 X && pwd", cwd: ".", outputByteLimit: 4096 });
       const ea = await a.waitForExit(); const oa = await a.currentOutput(); await a.release();
       const b = await conn.createTerminal({ sessionId, command: "printf", args: ["%s-%s", "a b", "c"] });
       await b.waitForExit(); const ob = await b.currentOutput(); await b.release();
