@@ -58,13 +58,18 @@ jobs:
           cp "hearth-acp-${VERSION}.tgz" dist-rel/
           (cd dist-rel && sha256sum * > SHA256SUMS)
           cat dist-rel/SHA256SUMS
-      - name: Publish to npm
-        continue-on-error: true
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Upgrade npm (trusted publishing needs >= 11.5.1)
         run: |
-          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then echo "NPM_TOKEN not set: skipping npm publish"; exit 0; fi
-          npm publish --provenance --access public
+          npm install -g npm@latest
+          npm --version
+      - name: Publish to npm (trusted publishing via OIDC)
+        continue-on-error: true
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          if npm view "hearth-acp@${VERSION}" version >/dev/null 2>&1; then
+            echo "hearth-acp@${VERSION} already on npm: skipping publish"; exit 0
+          fi
+          npm publish "./hearth-acp-${VERSION}.tgz" --provenance --access public
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -107,4 +112,4 @@ jobs:
           RB
           sed -i 's/^          //' tap/Formula/hearth.rb
           cd tap && git config user.name "hearth-release" && git config user.email "hearth-release@users.noreply.github.com"
-          cd tap && git add Formula/hearth.rb && git commit -m "hearth ${VERSION}" && git push
+          git add Formula/hearth.rb && git commit -m "hearth ${VERSION}" && git push
