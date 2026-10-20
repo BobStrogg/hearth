@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.1
+- Fix: the model/mode pills and settings sheet stayed empty for real agents. Config options are keyed by `id` in the
+  ACP spec (Claude Code, Grok Build and Devin all send `id`); Hearth only read a non-standard `configId`, dropped every
+  option, and then also skipped the legacy `modes`/`models` because `configOptions` was present. Both keys are now
+  accepted, and options saved by earlier versions show up again without restarting the agent.
+- Legacy `modes` / unstable `models` now fill in a category (mode or model) that the agent's config options don't
+  cover, so an agent that advertises its model as a config option but its mode only as `modes` gets both pills.
+  Config options that yield nothing usable fall back to the legacy shapes.
+- Select values wrapped as `{ value }` are accepted; selects without any choices are skipped.
+- Tests: the mock agent sends spec-shaped options and can also send `configId`, split (mode via `modes`), late
+  (`config_option_update` after `session/new`) and wrapped shapes; unit tests use trimmed real Claude Code payloads.
+
 ## 0.4.0
 - Cross-platform packaging. `hearth service install|uninstall|start|stop|restart|status|logs` behind a common
   ServiceManager: LaunchAgent (or `--system` LaunchDaemon) on macOS, systemd `--user` (or `--system`) on Linux, Task

@@ -18,13 +18,23 @@ const subs = new Map();
 const attach = (id) => subs.set(id, (subs.get(id) ?? 0) + 1);
 const fanout = (conn, p) => { const n = Math.max(1, subs.get(p.sessionId) ?? 1); return (async () => { for (let i = 0; i < n; i++) await conn.sessionUpdate(p); })(); };
 const MODELS = [{ group: "fast", name: "Fast", options: [{ value: "m-small", name: "Small" }] }, { group: "smart", name: "Smart", options: [{ value: "m-large", name: "Large", description: "Best" }] }];
+// Option shape (MOCK_SHAPE): "spec" (default, `id` like Claude Code / Grok Build / Devin), "configId" (non-standard key),
+// "split" (model/effort as config options, mode only as legacy `modes`), "late" (nothing in session/new; a
+// config_option_update right after), "wrapped" (currentValue as { value }).
+const SHAPE = process.env.MOCK_SHAPE || "spec";
 function cfg(s) {
+  const all = cfgAll(s).filter((o) => SHAPE !== "split" || o.id !== "mode");
+  if (SHAPE === "configId") return all.map(({ id, ...o }) => ({ configId: id, ...o }));
+  if (SHAPE === "wrapped") return all.map((o) => o.type === "select" ? { ...o, currentValue: { value: o.currentValue } } : o);
+  return all;
+}
+function cfgAll(s) {
   return [
-    { configId: "model", name: "Model", category: "model", type: "select", currentValue: s.model, options: MODELS },
-    { configId: "mode", name: "Mode", category: "mode", type: "select", currentValue: s.mode, options: [{ value: "code", name: "Code" }, { value: "ask", name: "Ask" }] },
+    { id: "model", name: "Model", category: "model", type: "select", currentValue: s.model, options: MODELS },
+    { id: "mode", name: "Mode", category: "mode", type: "select", currentValue: s.mode, options: [{ value: "code", name: "Code" }, { value: "ask", name: "Ask" }] },
     // reasoning effort depends on model, like real agents
-    { configId: "effort", name: "Effort", category: "thought_level", type: "select", currentValue: s.effort, options: s.model === "m-large" ? [{ value: "low", name: "Low" }, { value: "high", name: "High" }] : [{ value: "low", name: "Low" }] },
-    { configId: "web", name: "Web search", type: "boolean", currentValue: s.web },
+    { id: "effort", name: "Effort", category: "thought_level", type: "select", currentValue: s.effort, options: s.model === "m-large" ? [{ value: "low", name: "Low" }, { value: "high", name: "High" }] : [{ value: "low", name: "Low" }] },
+    { id: "web", name: "Web search", type: "boolean", currentValue: s.web },
   ];
 }
 const fresh = (cwd) => ({ cwd, history: [], model: "m-small", mode: "code", effort: "low", web: false, legacyModel: "lm-a", legacyMode: "code" });
@@ -36,7 +46,8 @@ new acp.AgentSideConnection((conn) => ({
   },
   async newSession({ cwd }) { const id = `mock-${++n}-${process.pid}`; const st = fresh(cwd); sessions.set(id, st);
     const legacy = { modes: { currentModeId: "code", availableModes: [{ id: "code", name: "Code" }, { id: "ask", name: "Ask" }] }, models: { currentModelId: "lm-a", availableModels: [{ modelId: "lm-a", name: "Alpha" }, { modelId: "lm-b", name: "Beta" }] } };
-    return { sessionId: id, ...legacy, ...(CONFIG ? { configOptions: cfg(st) } : {}) }; },
+    if (CONFIG && SHAPE === "late") setTimeout(() => conn.sessionUpdate({ sessionId: id, update: { sessionUpdate: "config_option_update", configOptions: cfg(st) } }), 20);
+    return { sessionId: id, ...legacy, ...(CONFIG && SHAPE !== "late" ? { configOptions: cfg(st) } : {}) }; },
   async setSessionConfigOption({ sessionId, configId, value }) {
     const s = sessions.get(sessionId);
     if (!["model", "mode", "effort", "web"].includes(configId)) throw acp.RequestError.invalidParams({ configId });
@@ -70,7 +81,7 @@ new acp.AgentSideConnection((conn) => ({
     return {};
   },
   async authenticate() { return {}; },
-  async setSessionMode({ sessionId, modeId }) { sessions.get(sessionId).legacyMode = modeId; return {}; },
+  async setSessionMode({ sessionId, modeId }) { const st = sessions.get(sessionId); st.legacyMode = modeId; if (SHAPE === "split") st.mode = modeId; return {}; },
   async cancel({ sessionId }) { const s = sessions.get(sessionId); if (s) s.cancelled = true; },
   async prompt({ sessionId, prompt }) {
     const s = sessions.get(sessionId); s.cancelled = false;

@@ -79,13 +79,14 @@ test("file fallback lists Claude and Codex sessions read-only", async () => {
   assert.equal(fileFallback("grok", home), null);
 });
 
-test("settings normalize: configOptions win, group/groupId, unknown types skipped, legacy fallback", async () => {
+test("settings normalize: configOptions win, group/groupId, unknown types skipped, legacy fills missing categories", async () => {
   const { normalize, applyUpdate } = await import("../dist/settings.js");
   const o = normalize({ configOptions: [
     { configId: "m", name: "Model", category: "model", type: "select", currentValue: "b", options: [{ group: "g1", name: "G1", options: [{ value: "a", name: "A" }] }, { groupId: "g2", name: "G2", options: [{ value: "b", name: "B" }] }] },
     { configId: "x", name: "X", type: "_future", currentValue: 1 },
-  ], modes: { currentModeId: "c", availableModes: [{ id: "c", name: "C" }] } });
-  assert.equal(o.length, 1); assert.deepEqual(o[0].choices.map((c) => c.group), ["G1", "G2"]);
+  ], modes: { currentModeId: "c", availableModes: [{ id: "c", name: "C" }] }, models: { currentModelId: "z", availableModels: [{ modelId: "z", name: "Z" }] } });
+  // model comes from configOptions (legacy models ignored); mode only exists as legacy modes, so it fills in
+  assert.deepEqual(o.map((x) => [x.id, x.via]), [["m", "config"], ["_hearth_mode", "mode"]]); assert.deepEqual(o[0].choices.map((c) => c.group), ["G1", "G2"]);
   const l = normalize({ modes: { currentModeId: "c", availableModes: [{ id: "c", name: "C" }] }, models: { currentModelId: "z", availableModels: [{ modelId: "z", name: "Z" }] } });
   assert.deepEqual(l.map((x) => [x.category, x.via]), [["mode", "mode"], ["model", "model"]]);
   assert.equal(applyUpdate({}, { sessionUpdate: "agent_message_chunk" }), null);
@@ -125,4 +126,28 @@ test("readPage: backward, turn-aligned paging over big JSONL (chunk-spanning lin
   const capped = st.readPage(m, { turns: 100, maxBytes: 1000 });
   assert.ok(capped.items.length >= 1 && capped.hasMore);
   assert.deepEqual(st.readPage(st.create("u", "a", "/tmp", "empty")), { items: [], hasMore: false });
+});
+
+test("settings normalize: spec `id` (Claude Code / Grok Build / Devin payloads), wrapped values, setLocal by id", async () => {
+  const { normalize, setLocal, applyUpdate } = await import("../dist/settings.js");
+  // trimmed from a real claude-agent-acp 0.93.0 session/new response (it also sends legacy `modes`)
+  const claude = { configOptions: [
+    { id: "mode", name: "Mode", category: "mode", type: "select", currentValue: "default", options: [{ value: "default", name: "Manual" }, { value: "plan", name: "Plan" }] },
+    { id: "model", name: "Model", category: "model", type: "select", currentValue: "default", options: [{ value: "default", name: "Default" }, { value: "sonnet", name: "Sonnet" }] },
+    { id: "effort", name: "Effort", category: "thought_level", type: "select", currentValue: "default", options: [{ value: "default", name: "Default" }] },
+  ], modes: { currentModeId: "default", availableModes: [{ id: "default", name: "Manual" }] } };
+  const o = normalize(claude);
+  assert.deepEqual(o.map((x) => [x.id, x.category, x.via]), [["mode", "mode", "config"], ["model", "model", "config"], ["effort", "thought_level", "config"]]);
+  // Grok Build style: model + reasoning effort as config options, permission mode only as legacy modes
+  const grok = normalize({ configOptions: [
+    { id: "model", name: "Model", category: "model", type: "select", currentValue: "g-1", options: [{ value: "g-1", name: "G1" }, { value: "g-2", name: "G2" }] },
+    { id: "reasoning_effort", name: "Reasoning", category: "thought_level", type: "select", currentValue: { value: "high" }, options: [{ value: "low", name: "Low" }, { value: "high", name: "High" }] },
+  ], modes: { currentModeId: "default", availableModes: [{ id: "default", name: "Default" }, { id: "plan", name: "Plan" }] } });
+  assert.deepEqual(grok.map((x) => [x.id, x.value]), [["model", "g-1"], ["reasoning_effort", "high"], ["_hearth_mode", "default"]]);
+  const next = setLocal(claude, o[1], "sonnet");
+  assert.equal(normalize(next).find((x) => x.id === "model").value, "sonnet");
+  const up = applyUpdate(claude, { sessionUpdate: "current_mode_update", currentModeId: "plan" });
+  assert.equal(normalize(up).find((x) => x.id === "mode").value, "plan");
+  // a select with no usable choices is skipped; configOptions that yield nothing fall back to legacy entirely
+  assert.deepEqual(normalize({ configOptions: [{ id: "q", name: "Q", type: "select", currentValue: "a", options: [] }], models: { currentModelId: "z", availableModels: [{ modelId: "z", name: "Z" }] } }).map((x) => x.via), ["model"]);
 });

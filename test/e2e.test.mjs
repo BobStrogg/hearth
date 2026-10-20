@@ -20,6 +20,7 @@ before(async () => {
     { id: "mockfull", name: "Mock full", detect: [process.execPath], command: process.execPath, args: [MOCK], env: { MOCK_LOAD_SESSION: "1", MOCK_LIST: "1", MOCK_RESUME: "1", MOCK_STORE: join(dataDir, "store.json") } },
     { id: "mockresume", name: "Mock resume", detect: [process.execPath], command: process.execPath, args: [MOCK], env: { MOCK_LIST: "1", MOCK_RESUME: "1", MOCK_STORE: join(dataDir, "store.json") } },
     { id: "mockcfg", name: "Mock config", detect: [process.execPath], command: process.execPath, args: [MOCK], env: { MOCK_CONFIG: "1" } },
+    ...["configId", "split", "late", "wrapped"].map((shape) => ({ id: `mockcfg-${shape}`, name: `Mock config (${shape})`, detect: [process.execPath], command: process.execPath, args: [MOCK], env: { MOCK_CONFIG: "1", MOCK_SHAPE: shape } })),
     { id: "devinfail", name: "Devin-like (load fails after attaching)", detect: [process.execPath], command: process.execPath, args: [MOCK], env: { MOCK_LOAD_SESSION: "1", MOCK_LIST: "1", MOCK_RESUME: "1", MOCK_LOAD_FAIL: "1", MOCK_STORE: join(dataDir, "store.json") } },
     { id: "devinlate", name: "Devin-like (late replay)", detect: [process.execPath], command: process.execPath, args: [MOCK], env: { MOCK_LOAD_SESSION: "1", MOCK_LIST: "1", MOCK_RESUME: "1", MOCK_LATE_REPLAY: "1", MOCK_STORE: join(dataDir, "store.json") } },
     { id: "mockload", name: "Mock+load", detect: [process.execPath], command: process.execPath, args: [MOCK], env: { MOCK_LOAD_SESSION: "1" } },
@@ -280,6 +281,30 @@ test("config options: select/boolean, grouped choices, dependent options, agent 
   const o4 = await settled(s4, (o) => o.length === 4); await s4.until((m) => m.type === "state" && m.state === "idle");
   assert.equal(val(o4.options, "model"), "m-small");
   s3.close(); s4.close();
+});
+
+test("config option shapes: spec id, configId, split (mode via legacy modes), late config_option_update, wrapped values", async () => {
+  const u = "shapes@example.com"; await api(u, "POST", "/api/unlock", { password: PW });
+  for (const shape of ["configId", "split", "late", "wrapped"]) {
+    const c = await api(u, "POST", `/api/sessions`, { agentId: `mockcfg-${shape}`, cwd: join(root, "proj") });
+    const s = await ws(u, c.json.id);
+    // "late" first shows the legacy modes/models, then the agent's config_option_update replaces them
+    const first = await settled(s, (o) => o.some((x) => x.id === "model") && o.some((x) => x.category === "mode"));
+    const model = first.options.find((o) => o.category === "model"), mode = first.options.find((o) => o.category === "mode");
+    assert.equal(model.id, "model", shape); assert.equal(model.value, "m-small", shape);
+    assert.equal(mode.via, shape === "split" ? "mode" : "config", shape);
+    s.send(JSON.stringify({ type: "setOption", configId: "model", value: "m-large" }));
+    await settled(s, (o) => val(o, "model") === "m-large");
+    s.send(JSON.stringify({ type: "setOption", configId: mode.id, value: "ask" }));
+    await settled(s, (o) => val(o, mode.id) === "ask");
+    s.send(JSON.stringify({ type: "prompt", text: "whoami" })); await s.until((m) => m.type === "prompt_done");
+    assert.match(text(h.store.read(h.live.get(c.json.id).meta)), /model=m-large mode=ask/, shape);
+    s.close();
+    // a fresh page load gets the stored options straight away
+    const s2 = await ws(u, c.json.id); const r = await s2.until((m) => m.type === "settings");
+    assert.equal(val(r.options, "model"), "m-large", shape); s2.close();
+    await api(u, "DELETE", `/api/sessions/${c.json.id}`);
+  }
 });
 
 test("legacy modes + unstable models: set_mode, set_model, current_mode_update", async () => {
