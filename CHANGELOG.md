@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.2
+- Same changes as 0.4.1 (which has no published release: its build hit a flaky streaming-timing test on a slow
+  macOS Intel runner). The test now judges the spread across all streamed chunks instead of a single gap.
+
 ## 0.4.1
 - Fix: the model/mode pills and settings sheet stayed empty for real agents. Config options are keyed by `id` in the
   ACP spec (Claude Code, Grok Build and Devin all send `id`); Hearth only read a non-standard `configId`, dropped every

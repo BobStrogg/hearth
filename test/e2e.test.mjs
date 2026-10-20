@@ -239,7 +239,9 @@ test("streaming: message and thought chunks reach the browser before the turn en
   const msg = seen.filter((x) => x[0] === "agent_message_chunk"), th = seen.filter((x) => x[0] === "agent_thought_chunk");
   assert.ok(msg.length >= 4 && th.length >= 4);
   assert.ok(done - msg[0][1] >= 400, `first chunk only ${done - msg[0][1]}ms before done`);
-  assert.ok(msg[1][1] - msg[0][1] >= 100, "chunks were batched");
+  // the mock sleeps 150ms between the 4 streamed words; batching would deliver them together. Judge the spread
+  // over all four (not one gap) so a slow runner delivering the first chunk late doesn't flake.
+  assert.ok(msg[3][1] - msg[0][1] >= 250, `chunks were batched (spread ${msg[3][1] - msg[0][1]}ms)`);
   s.close(); await api(U, "DELETE", `/api/sessions/${c.json.id}`);
 });
 
