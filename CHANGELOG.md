@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.4
+- Prompt queue: sending while the agent is busy queues the prompt (the send button reads "Queue") instead of failing
+  with "agent is busy". The queue is per session, kept on the machine in `sessions/<id>/queue.json` (written only when
+  it changes; removed when empty), capped at 10 prompts, and synced live to every open client.
+- A turn that ends normally runs the next queued prompt (FIFO, one at a time). An error, a Stop, or any other stop
+  reason (e.g. `max_tokens`, `refusal`) pauses the queue with the reason shown and a Resume button. A queue left over
+  from a Hearth restart also waits for Resume. Sending while paused and idle runs that prompt directly.
+- Queued prompts can be edited (text; attached images and other blocks are kept), moved (↑/↓, or drag on desktop),
+  deleted, or sent now (cancels the current turn, then runs that prompt and resumes the queue).
+- Session list entries include a `queued` count for live sessions. Auto-update also waits while a turn is starting.
+
 ## 0.4.3
 - `HEARTH_USER_ALIASES` (`alias=canonical` pairs; `hearth service install --user-aliases …`): one person signing in
   through several Access login methods (email PIN, GitHub, Google) keeps one set of sessions. Applied before the

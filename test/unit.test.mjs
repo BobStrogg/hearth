@@ -211,3 +211,42 @@ test("writeEnvFile records HEARTH_USER_ALIASES on create and on update", async (
   writeEnvFile(f2, {}, {}, "linux", "/home/u");
   assert.equal(parseEnv(readFileSync(f2, "utf8")).HEARTH_USER_ALIASES, undefined);
 });
+
+test("PromptQueue: persistence, ordering, edit/move/delete, cap, writes only on change", async () => {
+  const { PromptQueue, QUEUE_MAX } = await import("../dist/queue.js");
+  const { existsSync, statSync, readFileSync } = await import("node:fs");
+  const f = join(mkdtempSync(join(tmpdir(), "q-")), "queue.json");
+  const views = []; const q = new PromptQueue(f, (v) => views.push(v));
+  assert.equal(existsSync(f), false);
+  const t = (s) => [{ type: "text", text: s }];
+  const a = q.add(t("a")), b = q.add(t("b")), c = q.add([{ type: "text", text: "c" }, { type: "image", mimeType: "image/png", data: "iVBORw0KGgo=" }]);
+  assert.deepEqual(q.view().items.map((i) => i.text), ["a", "b", "c"]);
+  assert.equal(q.view().items[2].attachments, 1);
+  const ino = () => statSync(f).ino + ":" + statSync(f).mtimeMs;
+  const before = ino(); const nViews = views.length;
+  q.move(a.id, 0); q.edit(b.id, " b "); q.setPaused(false); // no-ops: no write, no broadcast
+  assert.equal(ino(), before); assert.equal(views.length, nViews);
+  q.move(c.id, 0); q.move(a.id, 99);
+  assert.deepEqual(q.items.map((i) => i.id), [c.id, b.id, a.id]);
+  q.edit(c.id, "c2"); // keeps the image
+  assert.deepEqual(q.items[0].content.map((x) => x.type), ["text", "image"]); assert.equal(q.items[0].content[0].text, "c2");
+  assert.throws(() => q.edit(b.id, "   "), /empty/);
+  q.edit(c.id, ""); assert.deepEqual(q.items[0].content.map((x) => x.type), ["image"]); // image-only is fine
+  q.remove(b.id); assert.throws(() => q.remove(b.id), /gone/);
+  assert.deepEqual(JSON.parse(readFileSync(f, "utf8")).items.map((i) => i.id), [c.id, a.id]);
+  // reload (restart): same order, paused in memory without rewriting the file
+  const st = ino();
+  const r = new PromptQueue(f);
+  assert.deepEqual(r.items.map((i) => i.id), [c.id, a.id]); assert.equal(r.paused, true); assert.match(r.reason, /restarted/);
+  assert.equal(ino(), st);
+  r.setPaused(false); assert.equal(ino(), st); // back to the persisted state: still no write
+  assert.equal(r.shift().id, c.id);
+  // cap
+  while (r.items.length < QUEUE_MAX) r.add(t("x"));
+  assert.throws(() => r.add(t("y")), /full/);
+  r.clear(); assert.equal(existsSync(f), false); // empty: no file
+  assert.equal(new PromptQueue(f).items.length, 0);
+  // corrupt file: start empty
+  const { writeFileSync } = await import("node:fs"); writeFileSync(f, "{nope");
+  assert.equal(new PromptQueue(f).items.length, 0);
+});

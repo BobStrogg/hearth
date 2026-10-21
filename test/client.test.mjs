@@ -62,3 +62,35 @@ test("reconnect races (drop + tab refocus) never duplicate streamed text", async
   assert.equal(b.$(".log").textContent, txt);
   chat.close(); b.w.close();
 });
+
+test("queue UI: 'Queue' while busy, compact list with actions, live sync, Resume after a stop", async () => {
+  const r = await fetch(base + "/api/sessions", { method: "POST", headers: { origin: base, "x-hearth-csrf": "1", "content-type": "application/json" }, body: JSON.stringify({ agentId: "mock", cwd: join(root, "p") }) });
+  const sid = (await r.json()).id;
+  const b = browser(`#/s/${sid}`);
+  await until(() => b.sockets.some((s) => s.readyState === 1) && b.$(".composer button.primary"));
+  const btn = b.$(".composer button.primary"), ta = b.$(".composer textarea");
+  assert.equal(btn.textContent, "Send"); assert.equal(b.$(".queue").hidden, true);
+  ta.value = "slow one"; btn.click();
+  await until(() => btn.textContent === "Queue");
+  ta.value = "second"; btn.click(); ta.value = "third"; btn.click();
+  await until(() => b.$(".queue .qlist") && b.$(".queue .qlist").children.length === 2);
+  assert.equal(b.$(".queue").hidden, false);
+  assert.match(b.$(".qhead").textContent, /Queued 2\/10/);
+  const items = () => [...b.$(".qlist").children].map((li) => li.querySelector(".qtext")?.textContent);
+  assert.deepEqual(items(), ["second", "third"]);
+  // move down with the ↓ button, then delete with ✕
+  b.$(".qlist li .qacts button[aria-label='Move down']").click();
+  await until(() => items()[0] === "third");
+  // edit inline
+  b.$(".qlist li .qacts button[aria-label='Edit']").click();
+  const ed = b.$(".qlist textarea.qedit"); assert.ok(ed); ed.value = "third, edited";
+  [...b.$(".qlist li .qacts").querySelectorAll("button")].find((x) => x.textContent === "Save").click();
+  await until(() => items()[0] === "third, edited");
+  // stop the running prompt: the queue pauses and offers Resume
+  b.$(".composer button.danger").click();
+  await until(() => b.$(".qresume"));
+  assert.match(b.$(".qhead").textContent, /Paused/);
+  b.$(".qresume").click();
+  await until(() => b.$(".queue").hidden === true, 10000);
+  b.w.__chat().close(); b.w.close();
+});

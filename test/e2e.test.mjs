@@ -379,3 +379,109 @@ test("history paging over WebSocket: tail on open, cursor pages, live entries me
   const s2 = await ws(U, c.json.id, seqs.at(-3)); const r2 = await s2.until((m) => m.type === "replay");
   assert.equal(r2.items.length, 2); s2.close();
 });
+
+test("prompt queue: FIFO auto-advance, live sync, edit/move/delete, pause on cancel and error, resume, send now, persisted", async () => {
+  const U = "alice@example.com";
+  const qid = (await api(U, "POST", "/api/sessions", { agentId: "mock", cwd: join(root, "proj"), title: "queue" })).json.id;
+  const a = await ws(U, qid), b = await ws(U, qid); // two devices
+  // wait for a message that arrives after `mark` (the ws helper's until() also matches older messages)
+  const mark = (s) => s.msgs.length;
+  const after = (s, m0, pred, ms = 8000) => new Promise((res, rej) => {
+    const t0 = Date.now();
+    const tick = () => { const f = s.msgs.slice(m0).find(pred); if (f) return res(f); if (Date.now() - t0 > ms) return rej(new Error("timeout; last: " + JSON.stringify(s.msgs.slice(-3)).slice(0, 600))); setTimeout(tick, 10); };
+    tick();
+  });
+  const isQ = (pred) => (m) => m.type === "queue" && pred(m);
+  const send = (s, o) => s.send(JSON.stringify(o));
+  const prompts = () => h.store.read(h.store.get(U, qid)).filter((e) => e.dir === "out" && e.msg.method === "session/prompt").map((e) => e.msg.params.prompt.map((c) => c.text).join(""));
+  const until = async (f, ms = 8000) => { for (const t0 = Date.now(); !f(); ) { if (Date.now() - t0 > ms) throw new Error("timeout; prompts " + JSON.stringify(prompts())); await new Promise((r) => setTimeout(r, 20)); } };
+  const file = join(h.store.dir(U, qid), "queue.json");
+  await after(a, 0, isQ((m) => m.items.length === 0 && m.max === 10));
+  assert.equal(existsSync(file), false); // nothing queued: no file
+
+  // 1) busy -> queued; the turn ends normally -> the next ones run by themselves, in order
+  let m0 = mark(a), n0 = mark(b);
+  send(a, { type: "prompt", text: "slow A" });
+  await until(() => prompts().length === 1);
+  send(a, { type: "prompt", text: "B" }); send(a, { type: "prompt", text: "C" });
+  await after(a, m0, (m) => m.type === "queued");
+  await after(b, n0, isQ((m) => m.items.map((i) => i.text).join() === "B,C")); // the other device sees it live
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")).items.map((i) => i.content[0].text), ["B", "C"]);
+  await until(() => prompts().length === 3);
+  await after(a, m0, isQ((m) => m.items.length === 0));
+  assert.deepEqual(prompts(), ["slow A", "B", "C"]);
+  await until(() => !existsSync(file));
+  await until(() => h.live.get(qid).turnActive === false);
+
+  // 2) edit / move / delete from the other device, synced back
+  send(a, { type: "prompt", text: "slow D" });
+  await until(() => prompts().length === 4);
+  n0 = mark(b);
+  for (const t of ["E", "F", "G"]) send(a, { type: "prompt", text: t });
+  let st = await after(b, n0, isQ((m) => m.items.length === 3));
+  const [E, F, G] = st.items.map((i) => i.id);
+  m0 = mark(a);
+  send(b, { type: "queue_edit", id: F, text: "F edited" });
+  send(b, { type: "queue_move", id: G, to: 0 });
+  send(b, { type: "queue_delete", id: E });
+  st = await after(a, m0, isQ((m) => m.items.length === 2 && m.items[0].id === G));
+  assert.deepEqual(st.items.map((i) => i.text), ["G", "F edited"]);
+
+  // 3) user cancel -> the queue pauses; nothing auto-runs; Resume continues it
+  m0 = mark(a);
+  send(a, { type: "cancel" });
+  st = await after(a, m0, isQ((m) => m.paused));
+  assert.match(st.reason, /stopped/);
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(prompts().length, 4);
+  assert.equal(JSON.parse(readFileSync(file, "utf8")).paused, true);
+  // sending while paused and idle runs it directly; the queue stays paused
+  await until(() => h.live.get(qid).turnActive === false);
+  m0 = mark(a);
+  send(a, { type: "prompt", text: "direct" });
+  await after(a, m0, (m) => m.type === "prompt_done");
+  assert.equal(prompts().at(-1), "direct");
+  assert.equal(h.live.get(qid).queue.paused, true);
+  m0 = mark(a);
+  send(a, { type: "queue_resume" });
+  await after(a, m0, isQ((m) => m.items.length === 0));
+  await until(() => prompts().length === 7);
+  assert.deepEqual(prompts().slice(4), ["direct", "G", "F edited"]);
+  await until(() => h.live.get(qid).turnActive === false);
+
+  // 4) send now: cancels the current turn and runs that item next; it fails -> the queue pauses with the error
+  send(a, { type: "prompt", text: "slow X" });
+  await until(() => prompts().at(-1) === "slow X");
+  m0 = mark(a);
+  send(a, { type: "prompt", text: "Y" }); send(a, { type: "prompt", text: "explode now" });
+  st = await after(a, m0, isQ((m) => m.items.length === 2));
+  m0 = mark(a);
+  send(a, { type: "queue_send_now", id: st.items[1].id });
+  st = await after(a, m0, isQ((m) => m.paused));
+  assert.match(st.reason, /failed: .*exploded/);
+  assert.deepEqual(st.items.map((i) => i.text), ["Y"]);
+  assert.deepEqual(prompts().slice(-2), ["slow X", "explode now"]);
+  await until(() => h.live.get(qid).turnActive === false);
+
+  // 5) cap, with a clear message
+  send(a, { type: "prompt", text: "slow cap" });
+  await until(() => prompts().at(-1) === "slow cap");
+  m0 = mark(a);
+  for (let i = 0; i < 10; i++) send(a, { type: "prompt", text: `n${i}` });
+  const full = await after(a, m0, (m) => m.type === "error" && /queue is full/i.test(m.message));
+  assert.match(full.message, /10/);
+  await after(a, m0, isQ((m) => m.items.length === 10));
+  // 6) persisted: a fresh reader of the session dir (as after a Hearth restart) sees the same queue, paused
+  const { PromptQueue } = await import("../dist/queue.js");
+  const re = new PromptQueue(file);
+  assert.equal(re.items.length, 10); assert.equal(re.items[0].content[0].text, "Y"); assert.equal(re.paused, true);
+  m0 = mark(a);
+  send(a, { type: "queue_clear" });
+  await after(a, m0, isQ((m) => m.items.length === 0));
+  send(a, { type: "cancel" });
+  await after(a, m0, (m) => m.type === "prompt_done" && m.stopReason === "cancelled");
+  assert.equal(existsSync(file), false);
+  // ownership: another user can't reach this session (or its queue)
+  await assert.rejects(ws("bob@example.com", qid), /ws 404/);
+  a.close(); b.close();
+});

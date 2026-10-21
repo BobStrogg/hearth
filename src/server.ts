@@ -114,7 +114,7 @@ export class Hearth {
     return this.rel.release;
   }
   /** True while any agent is mid-turn: restarting then would cut it off. */
-  busy() { return [...this.live.values()].some((l) => l.meta.state === "running" || l.pending.size > 0); }
+  busy() { return [...this.live.values()].some((l) => l.turnActive || l.meta.state === "running" || l.pending.size > 0); }
   private async versionInfo(check: boolean) {
     const rel = check ? await this.release() : this.rel.release;
     const info = installInfo(); const p = plan(info);
@@ -171,7 +171,7 @@ export class Hearth {
   private view(m: SessionMeta) {
     const l = this.live.get(m.id);
     return { id: m.id, title: m.title, agentId: m.agentId, cwd: m.cwd, createdAt: m.createdAt, lastActivity: m.lastActivity,
-      state: l?.meta.state ?? m.state, importedFrom: m.importedFrom ?? null, pendingPermissions: l?.pending.size ?? 0, seq: l?.meta.seq ?? m.seq };
+      state: l?.meta.state ?? m.state, importedFrom: m.importedFrom ?? null, pendingPermissions: l?.pending.size ?? 0, seq: l?.meta.seq ?? m.seq, queued: l?.queue.items.length ?? 0 };
   }
 
   private async http(q: IncomingMessage, s: ServerResponse) {
@@ -358,6 +358,7 @@ export class Hearth {
     send({ type: "replay", items, hasMore: page.hasMore, firstSeq: rawItems[0]?.seq ?? null, agent: l.meta.agentId, cwd: l.meta.cwd, loadSession: !!l.caps?.agentCapabilities?.loadSession });
     send({ type: "state", state: l.meta.state, title: l.meta.title });
     send({ type: "settings", options: l.options });
+    send({ type: "queue", ...l.queue.view() });
     for (const [pid, p] of l.pending) send({ type: "permission", id: pid, params: p.params });
     replaying = false;
     for (const e of buffered) { const ent = (e as { entry?: { seq: number } }).entry; if (!ent || ent.seq > last) send(e); }
@@ -365,14 +366,21 @@ export class Hearth {
     const ping = setInterval(() => { if (ws.readyState === ws.OPEN) ws.ping(); }, 25000);
     ws.on("close", () => { clearInterval(ping); l.listeners.delete(listener); });
     ws.on("message", async (raw) => {
-      let msg: { type?: string; content?: unknown; id?: string; optionId?: string | null; text?: string; modeId?: string; configId?: string; value?: unknown; before?: unknown };
+      let msg: { type?: string; content?: unknown; id?: string; optionId?: string | null; text?: string; modeId?: string; configId?: string; value?: unknown; before?: unknown; to?: unknown };
       try { msg = JSON.parse(String(raw)); } catch { return; }
       try {
         if (msg.type === "prompt") {
           const content = Array.isArray(msg.content) ? msg.content : [{ type: "text", text: String(msg.text ?? "") }];
-          l.prompt(content as never).then((r) => l.emit({ type: "prompt_done", stopReason: r.stopReason }))
-            .catch((e) => send({ type: "error", message: String(e?.message ?? e) }));
+          if (!content.every((c) => c && typeof c === "object" && typeof (c as { type?: unknown }).type === "string")) throw new Error("bad prompt content");
+          const r = l.submit(content as never);
+          if (r.queued) send({ type: "queued" });
         } else if (msg.type === "cancel") await l.cancel();
+        else if (msg.type === "queue_edit" && typeof msg.id === "string") l.queue.edit(msg.id, String(msg.text ?? ""));
+        else if (msg.type === "queue_move" && typeof msg.id === "string" && Number.isFinite(Number(msg.to))) l.queue.move(msg.id, Number(msg.to));
+        else if (msg.type === "queue_delete" && typeof msg.id === "string") l.queue.remove(msg.id);
+        else if (msg.type === "queue_clear") l.queue.clear();
+        else if (msg.type === "queue_resume") l.resumeQueue();
+        else if (msg.type === "queue_send_now" && typeof msg.id === "string") await l.sendNow(msg.id);
         else if (msg.type === "permission" && msg.id) l.answerPermission(msg.id, msg.optionId ?? null);
         else if (msg.type === "setOption" && typeof msg.configId === "string") await l.setOption(msg.configId, msg.value);
         else if (msg.type === "setMode" && msg.modeId) {

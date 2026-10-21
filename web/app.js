@@ -166,7 +166,8 @@ class Chat {
     this.sendBtn = h("button", { class: "primary", onclick: () => this.send() }, "Send");
     this.stopBtn = h("button", { class: "danger", hidden: true, onclick: () => this.ws?.send(JSON.stringify({ type: "cancel" })) }, "Stop");
     this.ctl = h("div", { class: "ctl", hidden: true }); this.options = [];
-    $("#view").replaceChildren(h("div", { class: "chat" }, this.log, this.permBox, h("div", { class: "composer-wrap" }, this.ctl, h("div", { class: "composer" }, this.input, this.stopBtn, this.sendBtn))));
+    this.qBox = h("div", { class: "queue", hidden: true }); this.queue = { items: [], paused: false, reason: null, max: 10 }; this.qEdit = null; this.busy = false;
+    $("#view").replaceChildren(h("div", { class: "chat" }, this.log, this.permBox, h("div", { class: "composer-wrap" }, this.qBox, this.ctl, h("div", { class: "composer" }, this.input, this.stopBtn, this.sendBtn))));
     this.onVis = () => { if (document.visibilityState === "visible" && (!this.ws || this.ws.readyState > 1)) this.connect(); };
     document.addEventListener("visibilitychange", this.onVis);
     this.connect();
@@ -216,11 +217,53 @@ class Chat {
     };
   }
   close() { this.closed = true; clearTimeout(this.retryTimer); document.removeEventListener("visibilitychange", this.onVis); this.ws?.close(); }
-  status(s) { setHeader($("#title").textContent, { back: true, menu: true, status: s }); this.stopBtn.hidden = s !== "running"; }
+  status(s) {
+    setHeader($("#title").textContent, { back: true, menu: true, status: s }); this.stopBtn.hidden = s !== "running";
+    this.busy = s === "running"; this.sendBtn.textContent = this.busy ? "Queue" : "Send";
+    this.sendBtn.title = this.busy ? "The agent is busy: this prompt waits in the queue and runs next" : "";
+    this.renderQueue();
+  }
   send() {
     const text = this.input.value.trim(); if (!text || this.ws?.readyState !== 1) return;
+    if (this.busy && this.queue.items.length >= this.queue.max) return this.note(`The queue is full (${this.queue.max} prompts). Wait for the agent, or remove a queued prompt.`, "err");
     this.ws.send(JSON.stringify({ type: "prompt", content: [{ type: "text", text }] }));
     this.input.value = ""; this.grow();
+  }
+  qsend(o) { if (this.ws?.readyState === 1) this.ws.send(JSON.stringify(o)); }
+  /** Queued prompts: a compact list above the composer (edit, reorder, delete, send now, resume). */
+  renderQueue() {
+    const q = this.queue, n = q.items.length;
+    this.qBox.hidden = !n; if (!n) { this.qBox.replaceChildren(); this.qEdit = null; return; }
+    if (this.qEdit && !q.items.some((i) => i.id === this.qEdit)) this.qEdit = null;
+    const head = h("div", { class: "qhead" }, h("span", {}, `Queued ${n}/${q.max}`),
+      h("span", { class: "qwhy" }, q.paused ? `· Paused${q.reason ? `: ${q.reason}` : ""}` : "· runs after the current prompt"),
+      q.paused ? h("button", { class: "qbtn qresume", title: "Run the next queued prompt and continue", onclick: () => this.qsend({ type: "queue_resume" }) }, "Resume") : null);
+    const list = h("ol", { class: "qlist" });
+    q.items.forEach((it, i) => {
+      const li = h("li", { class: "qitem", draggable: this.qEdit ? false : "true",
+        ondragstart: (e) => { e.dataTransfer.setData("text/x-hearth-q", it.id); e.dataTransfer.effectAllowed = "move"; li.classList.add("drag"); },
+        ondragend: () => li.classList.remove("drag"),
+        ondragover: (e) => { if ([...e.dataTransfer.types].includes("text/x-hearth-q")) { e.preventDefault(); li.classList.add("over"); } },
+        ondragleave: () => li.classList.remove("over"),
+        ondrop: (e) => { e.preventDefault(); li.classList.remove("over"); const id = e.dataTransfer.getData("text/x-hearth-q"); if (id && id !== it.id) this.qsend({ type: "queue_move", id, to: i }); } });
+      if (this.qEdit === it.id) {
+        const ta = h("textarea", { class: "qedit", rows: 2, "aria-label": "Edit queued prompt" }); ta.value = it.text;
+        const save = () => { this.qEdit = null; this.qsend({ type: "queue_edit", id: it.id, text: ta.value }); this.renderQueue(); };
+        ta.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey && !matchMedia("(pointer: coarse)").matches) { e.preventDefault(); save(); } else if (e.key === "Escape") { this.qEdit = null; this.renderQueue(); } });
+        li.append(ta, h("div", { class: "qacts" }, h("button", { class: "qbtn", onclick: save }, "Save"), h("button", { class: "qbtn", onclick: () => { this.qEdit = null; this.renderQueue(); } }, "Cancel")));
+        setTimeout(() => ta.focus(), 0);
+      } else {
+        li.append(h("span", { class: "qtext", title: it.text, onclick: () => { this.qEdit = it.id; this.renderQueue(); } }, it.text || "(attachment)", it.attachments ? h("span", { class: "muted" }, ` +${it.attachments} 📎`) : null),
+          h("div", { class: "qacts" },
+            h("button", { class: "qbtn", title: "Move up", "aria-label": "Move up", disabled: i === 0, onclick: () => this.qsend({ type: "queue_move", id: it.id, to: i - 1 }) }, "↑"),
+            h("button", { class: "qbtn", title: "Move down", "aria-label": "Move down", disabled: i === n - 1, onclick: () => this.qsend({ type: "queue_move", id: it.id, to: i + 1 }) }, "↓"),
+            h("button", { class: "qbtn", title: "Edit", "aria-label": "Edit", onclick: () => { this.qEdit = it.id; this.renderQueue(); } }, "✎"),
+            h("button", { class: "qbtn", title: this.busy ? "Stop the current prompt and send this now" : "Send this now", "aria-label": "Send now", onclick: () => this.qsend({ type: "queue_send_now", id: it.id }) }, "▶"),
+            h("button", { class: "qbtn qdel", title: "Delete", "aria-label": "Delete", onclick: () => this.qsend({ type: "queue_delete", id: it.id }) }, "✕")));
+      }
+      list.append(li);
+    });
+    this.qBox.replaceChildren(head, list);
   }
   onMsg(m) {
     const atBottom = this.atEnd || this.endGap() < 80;
@@ -236,6 +279,8 @@ class Chat {
     else if (m.type === "state") { setHeader(m.title, { back: true, menu: true, status: m.state }); this.status(m.state); this.title = m.title; }
     else if (m.type === "settings") { this.options = m.options || []; this.renderCtl(); if (!$("#sheet").hidden && this.settingsOpen) this.openSettings(); }
     else if (m.type === "permission") this.addPerm(m);
+    else if (m.type === "queue") { this.queue = { items: m.items || [], paused: !!m.paused, reason: m.reason ?? null, max: m.max || 10 }; this.renderQueue(); }
+    else if (m.type === "queued") { /* shown by the queue update */ }
     else if (m.type === "permission_resolved") { this.perms.get(m.id)?.remove(); this.perms.delete(m.id); }
     else if (m.type === "prompt_done") { this.cur = null; if (m.stopReason !== "end_turn") this.note(`Stopped: ${m.stopReason}`); }
     else if (m.type === "error" && /setting|config|mode|model/i.test(m.message) && this.options.length) { this.renderCtl(); this.note(m.message, "err"); }

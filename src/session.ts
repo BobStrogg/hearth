@@ -8,6 +8,7 @@ import { type AgentDef, searchPath, winShell } from "./agents.js";
 import type { SessionMeta, Store, TranscriptEntry } from "./store.js";
 import { absorb, applyUpdate, MODE_ID, MODEL_ID, normalize, setLocal, valid, type RawSettings, type UiOption } from "./settings.js";
 import { VERSION } from "./version.js";
+import { PromptQueue, QueueError, type QueueView } from "./queue.js";
 
 export type LiveEvent =
   | { type: "entry"; entry: TranscriptEntry }
@@ -16,7 +17,8 @@ export type LiveEvent =
   | { type: "permission_resolved"; id: string; optionId?: string }
   | { type: "prompt_done"; stopReason: string }
   | { type: "error"; message: string }
-  | { type: "settings"; options: UiOption[] };
+  | { type: "settings"; options: UiOption[] }
+  | ({ type: "queue" } & QueueView);
 
 interface Pending { params: acp.RequestPermissionRequest; resolve: (r: acp.RequestPermissionResponse) => void }
 export interface Term { buf: Buffer; truncated: boolean; exit?: { exitCode: number | null; signal: string | null }; done: Promise<void>; text(): string; kill(): void }
@@ -92,7 +94,60 @@ export class LiveSession {
   private starting?: Promise<void>;
   prompting = false;
 
-  constructor(public meta: SessionMeta, private agent: AgentDef, private store: Store) {}
+  /** Prompts sent while a turn is running; see submit(). */
+  readonly queue: PromptQueue;
+  /** True from the moment a turn is requested until it has finished (covers agent start-up, unlike `prompting`). */
+  turnActive = false;
+  private userCancelled = false;
+  private sendNowPending = false;
+
+  constructor(public meta: SessionMeta, private agent: AgentDef, private store: Store) {
+    let file = "";
+    try { file = join(store.dir(meta.owner, meta.id), "queue.json"); } catch { /* bad id: never persisted */ }
+    this.queue = new PromptQueue(file, (v) => this.emit({ type: "queue", ...v }));
+  }
+
+  /**
+   * A prompt from the user: runs now if the agent is free, otherwise joins the queue (FIFO). After a turn ends
+   * normally the next queued prompt runs by itself; after an error, a cancel or any other stop reason the queue
+   * pauses until the user resumes it.
+   */
+  submit(content: acp.ContentBlock[]): { queued: boolean } {
+    if (!Array.isArray(content) || !content.length) throw new QueueError("empty prompt");
+    if (this.turnActive) { this.queue.add(content); return { queued: true }; }
+    void this.runTurn(content);
+    return { queued: false };
+  }
+  /** Resume a paused queue (or start a waiting one): runs the next prompt if the agent is free. */
+  resumeQueue() { this.queue.setPaused(false); if (!this.turnActive) this.next(); }
+  /** Run this queued prompt now: it moves to the front, and the current turn (if any) is cancelled first. */
+  async sendNow(id: string) {
+    const i = this.queue.items.findIndex((x) => x.id === id);
+    if (i < 0) throw new QueueError("that queued prompt is gone");
+    this.queue.move(id, 0);
+    if (!this.turnActive) { this.queue.setPaused(false); this.next(); return; }
+    this.sendNowPending = true;
+    await this.cancel(true);
+  }
+  private next() {
+    if (!this.queue.items.length) return;
+    this.turnActive = true; // before the queue update goes out, so no client sees "idle with a queue"
+    void this.runTurn(this.queue.shift()!.content as acp.ContentBlock[]);
+  }
+  private async runTurn(content: acp.ContentBlock[]) {
+    this.turnActive = true; this.userCancelled = false;
+    let stop: string | undefined, err: string | undefined;
+    try { stop = (await this.prompt(content)).stopReason; this.emit({ type: "prompt_done", stopReason: stop }); }
+    catch (e) { err = String((e as Error)?.message ?? e); this.emit({ type: "error", message: err }); }
+    finally { this.turnActive = false; }
+    const sendNow = this.sendNowPending; this.sendNowPending = false;
+    if (!this.queue.items.length || this.meta.state === "exited") return;
+    if (sendNow) { this.queue.setPaused(false); return this.next(); }
+    if (err) return this.queue.setPaused(true, `the last prompt failed: ${err.slice(0, 200)}`);
+    if (this.userCancelled || stop === "cancelled") return this.queue.setPaused(true, "you stopped the last prompt");
+    if (stop !== "end_turn") return this.queue.setPaused(true, `the last prompt stopped: ${stop}`);
+    if (!this.queue.paused) this.next();
+  }
 
   emit(e: LiveEvent) { for (const l of this.listeners) { try { l(e); } catch { /* ignore */ } } }
 
@@ -288,7 +343,8 @@ export class LiveSession {
     } finally { this.prompting = false; if (this.alive) this.setState("idle"); }
   }
 
-  async cancel() {
+  async cancel(internal = false) {
+    if (!internal && this.turnActive) this.userCancelled = true;
     if (this.conn && this.meta.agentSessionId) await this.conn.cancel({ sessionId: this.meta.agentSessionId });
     for (const [id, p] of this.pending) { p.resolve({ outcome: { outcome: "cancelled" } }); this.emit({ type: "permission_resolved", id }); }
     this.pending.clear();

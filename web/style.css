@@ -63,3 +63,14 @@ figcaption { margin-top:.2rem; font-size:.75rem; }
 .lightbox img { max-width:100%; max-height:calc(100dvh - 6rem); object-fit:contain; border-radius:6px; }
 .lb-actions { display:flex; gap:.5rem; } .lb-actions .imgact { font-size:.9rem; padding:.35rem .9rem; color:var(--fg); background:#222a; border-color:#fff4; }
 .verbar { text-align:center; padding:.4rem .8rem 1.2rem; } .verbar .pillbtn { min-height:28px; padding:.1rem .7rem; border-radius:99px; font-size:.8rem; }
+.queue { padding:.45rem .8rem 0; font-size:.85rem; } .queue[hidden] { display:none; }
+.qhead { display:flex; align-items:center; gap:.4rem; color:var(--muted); font-size:.78rem; margin-bottom:.3rem; } .qwhy { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.qlist { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:.3rem; max-height:32dvh; overflow:auto; }
+.qitem { display:flex; align-items:center; gap:.4rem; background:var(--card); border:1px solid var(--line); border-radius:10px; padding:.25rem .3rem .25rem .6rem; }
+.qitem.drag { opacity:.5; } .qitem.over { border-color:var(--acc); }
+.qtext { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; cursor:text; }
+.qacts { display:flex; gap:.2rem; flex:0 0 auto; }
+.qbtn { min-height:30px; min-width:30px; padding:.1rem .45rem; border-radius:99px; font-size:.8rem; color:var(--muted); }
+.qbtn.qresume { margin-left:auto; color:var(--acc); border-color:var(--acc); } .qbtn.qdel:hover { color:var(--bad); border-color:var(--bad); }
+.qedit { flex:1; min-height:0; resize:vertical; font-size:.85rem; padding:.35rem .5rem; }
+@media (max-width:480px) { .qitem { flex-wrap:wrap; } .qitem .qacts { margin-left:auto; } }

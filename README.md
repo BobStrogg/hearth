@@ -13,6 +13,11 @@ Cursor and Devin.
   (`session/list` → `session/load` / `session/resume`, with a read-only file fallback for Claude Code and Codex).
 - **Phone-first chat UI.** Streaming markdown, inline images (from agent messages, tool results and markdown; tap to
   enlarge), tool-call cards, diffs, plans, approve/deny buttons, stop and rename. It also works as a PWA.
+- **Prompt queue.** Send while the agent is busy and the prompt waits in a per-session queue on the machine
+  (`sessions/<id>/queue.json`, up to 10 prompts), shown above the composer on every device. When a turn finishes
+  normally the next one runs by itself, in order. After an error, a Stop, or any other stop reason the queue pauses
+  until you press Resume. Queued prompts can be edited, reordered (↑/↓ or drag), deleted, or sent now (stops the
+  current turn first). After a Hearth restart a leftover queue waits for Resume.
 - **Updates itself.** `hearth update` (and the optional auto-update) pulls a verified release from GitHub, restarts the
   service and rolls back if the health check fails. The web UI shows the installed version and an "Update now" button.
 - **Private by design.** It listens on 127.0.0.1 only. Each session belongs to the identity that created it. Host,
