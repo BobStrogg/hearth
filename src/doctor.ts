@@ -49,6 +49,8 @@ export async function doctor(opts: { online?: boolean } = {}): Promise<Check[]> 
     }
   } else if (id.startsWith("header:")) add("warn", `identity=${id}: any local process can set that header`, "Prefer `cloudflare` identity on shared machines.");
   else add("ok", `identity=${id} (single user${id.length > 7 ? ` ${id.slice(7)}` : ""})`);
+  const aliases = Object.keys(cfg.userAliases ?? {}).length;
+  if (aliases) add("ok", `User aliases: ${aliases} identit${aliases === 1 ? "y maps" : "ies map"} to a canonical user`);
   const pw = cfg.password.split(":")[0];
   if (pw === "os") {
     if (process.platform === "darwin") add(existsSync("/usr/bin/dscl") ? "ok" : "fail", "Password unlock: macOS account password (dscl)");

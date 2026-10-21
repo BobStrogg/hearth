@@ -19,7 +19,16 @@ teams). Replace `example.com`, the team name and emails with your own.
    ```
    Hearth verifies `Cf-Access-Jwt-Assertion` on every request and WebSocket. The email in the token becomes the session
    owner, so two people allowed by the same Access app each see only their own sessions.
-4. **Several machines.** Give each machine its own hostname and Access app (for example `laptop-agents` and
+4. **Several login methods.** If you let people sign in with more than one Access login method (for example the email
+   one-time PIN plus GitHub or Google), each method can report a different email, and Hearth would treat them as
+   different owners with separate sessions. Map the extra identities onto one canonical identity:
+   ```
+   HEARTH_USER_ALIASES=you@gmail.com=you@example.com,you-github@example.com=you@example.com
+   ```
+   or `hearth service install --user-aliases "you@gmail.com=you@example.com"`. Only add identities that the Access
+   policy already allows; an alias grants exactly the canonical user's sessions. For GitHub logins the email is the
+   account's primary verified email.
+5. **Several machines.** Give each machine its own hostname and Access app (for example `laptop-agents` and
    `desktop-agents`), each with the policy you want, and its own `HEARTH_CF_AUD`.
 
 Tips:

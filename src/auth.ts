@@ -10,11 +10,34 @@ export interface AuthConfig {
   identity: string;          // "single:<name>" | "header:<header-name>" | "cloudflare"
   cfTeamDomain?: string;     // e.g. https://myteam.cloudflareaccess.com
   cfAud?: string;            // Access application AUD tag
-  allowedUsers?: string[];   // optional allow-list of identities
+  allowedUsers?: string[];   // optional allow-list of identities (checked after aliasing)
+  userAliases?: Record<string, string>; // alias identity -> canonical identity (lower-case)
   password: string;          // "off" | "os" | "scrypt:<saltHex>:<hashHex>"
   unlockTtlHours: number;
   allowedOrigins: string[];
   dataDir: string;
+}
+
+/**
+ * Parse HEARTH_USER_ALIASES: comma/semicolon/newline-separated `alias=canonical` pairs, e.g.
+ * `me@gmail.com=me@work.example, me@users.noreply.github.com=me@work.example`.
+ * Case-insensitive; one hop only (no chaining); malformed entries and self-maps are ignored.
+ */
+export function parseUserAliases(v?: string): Record<string, string> {
+  const out: Record<string, string> = Object.create(null);
+  for (const part of (v ?? "").split(/[,;\n]/)) {
+    const i = part.indexOf("=");
+    if (i < 1) continue;
+    const from = part.slice(0, i).trim().toLowerCase(), to = part.slice(i + 1).trim().toLowerCase();
+    if (from && to && from !== to) out[from] = to;
+  }
+  return out;
+}
+
+/** Map an identity to its canonical form (one hop). */
+export function canonicalUser(who: string, aliases?: Record<string, string>): string {
+  const k = who.trim().toLowerCase();
+  return aliases && Object.prototype.hasOwnProperty.call(aliases, k) ? aliases[k] : k;
 }
 
 export function hashPassword(pw: string) {
@@ -53,8 +76,11 @@ export class Auth {
         who = typeof payload.email === "string" ? payload.email.toLowerCase() : null;
       } catch { return null; }
     }
-    if (who && this.cfg.allowedUsers?.length && !this.cfg.allowedUsers.includes(who)) return null;
-    return who;
+    if (!who) return null;
+    const canon = canonicalUser(who, this.cfg.userAliases);
+    // The allow-list may name either the canonical identity or the alias itself.
+    if (this.cfg.allowedUsers?.length && !this.cfg.allowedUsers.includes(canon) && !this.cfg.allowedUsers.includes(who)) return null;
+    return canon;
   }
 
   // ---- Origin / Host / CSRF ----

@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+- `HEARTH_USER_ALIASES` (`alias=canonical` pairs; `hearth service install --user-aliases …`): one person signing in
+  through several Access login methods (email PIN, GitHub, Google) keeps one set of sessions. Applied before the
+  allow-list and the per-user data dir; `hearth doctor` reports the alias count.
+
 ## 0.4.2
 - Same changes as 0.4.1 (which has no published release: its build hit a flaky streaming-timing test on a slow
   macOS Intel runner). The test now judges the spread across all streamed chunks instead of a single gap.

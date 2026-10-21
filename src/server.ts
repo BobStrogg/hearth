@@ -5,7 +5,7 @@ import { basename, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer, type WebSocket } from "ws";
 import { type AgentDef, deepProbe, loadAgents, probe } from "./agents.js";
-import { Auth, type AuthConfig } from "./auth.js";
+import { Auth, type AuthConfig, parseUserAliases } from "./auth.js";
 import { listExternal } from "./importer.js";
 import { installInfo, isSea } from "./install-info.js";
 import { dataDir } from "./platform.js";
@@ -38,6 +38,7 @@ export function configFromEnv(env = process.env): Config {
     identity: env.HEARTH_IDENTITY ?? "single:",
     cfTeamDomain: env.HEARTH_CF_TEAM_DOMAIN, cfAud: env.HEARTH_CF_AUD,
     allowedUsers: list(env.HEARTH_ALLOWED_USERS).map((u) => u.toLowerCase()),
+    userAliases: parseUserAliases(env.HEARTH_USER_ALIASES),
     password: env.HEARTH_PASSWORD ?? "off",
     unlockTtlHours: Number(env.HEARTH_UNLOCK_TTL_HOURS ?? 12),
     allowedOrigins: list(env.HEARTH_ALLOWED_ORIGINS).length ? list(env.HEARTH_ALLOWED_ORIGINS) : [`http://127.0.0.1:${port}`, `http://localhost:${port}`],

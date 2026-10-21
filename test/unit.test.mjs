@@ -151,3 +151,63 @@ test("settings normalize: spec `id` (Claude Code / Grok Build / Devin payloads),
   // a select with no usable choices is skipped; configOptions that yield nothing fall back to legacy entirely
   assert.deepEqual(normalize({ configOptions: [{ id: "q", name: "Q", type: "select", currentValue: "a", options: [] }], models: { currentModelId: "z", availableModels: [{ modelId: "z", name: "Z" }] } }).map((x) => x.via), ["model"]);
 });
+
+test("HEARTH_USER_ALIASES: parsing and canonical identity", async () => {
+  const { parseUserAliases, canonicalUser } = await import("../dist/auth.js");
+  const m = parseUserAliases(" Alt@Example.org = Main@Example.com ;gh@example.com=main@example.com\nbad, =x, y=, self@x=self@x");
+  assert.deepEqual({ ...m }, { "alt@example.org": "main@example.com", "gh@example.com": "main@example.com" });
+  assert.equal(canonicalUser("ALT@example.org", m), "main@example.com");
+  assert.equal(canonicalUser("other@example.com", m), "other@example.com");
+  assert.equal(canonicalUser("__proto__", m), "__proto__");
+  assert.equal(canonicalUser("constructor", m), "constructor");
+  assert.deepEqual({ ...parseUserAliases(undefined) }, {});
+  // one hop only
+  const c = parseUserAliases("a@x=b@x,b@x=c@x");
+  assert.equal(canonicalUser("a@x", c), "b@x");
+});
+
+test("user aliases: JWT identity is canonicalised (same owner, same sessions), allow-list honoured", async () => {
+  const { parseUserAliases } = await import("../dist/auth.js");
+  const dataDir = mkdtempSync(join(tmpdir(), "al-"));
+  const { publicKey, privateKey } = await generateKeyPair("RS256");
+  const jwk = { ...(await exportJWK(publicKey)), kid: "k1", alg: "RS256" };
+  const srv = createServer((q, s) => { s.setHeader("content-type", "application/json"); s.end(JSON.stringify({ keys: [jwk] })); });
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  const team = `http://127.0.0.1:${srv.address().port}`;
+  const tok = (email) => new SignJWT({ email }).setProtectedHeader({ alg: "RS256", kid: "k1" }).setIssuer(team).setAudience("aud1").setExpirationTime("5m").sign(privateKey);
+  const userAliases = parseUserAliases("alice@gmail.example=alice@example.com,Alice-GH@example.com=alice@example.com");
+  const base = { identity: "cloudflare", cfTeamDomain: team, cfAud: "aud1", password: "off", unlockTtlHours: 1, allowedOrigins: [], dataDir, userAliases };
+  const a = new Auth({ ...base, allowedUsers: [] });
+  const h = async (e) => a.identify({ headers: { "cf-access-jwt-assertion": await tok(e) } });
+  assert.equal(await h("Alice@Example.com"), "alice@example.com");
+  assert.equal(await h("alice@gmail.example"), "alice@example.com");
+  assert.equal(await h("alice-gh@example.com"), "alice@example.com");
+  assert.equal(await h("bob@example.com"), "bob@example.com");
+  // the canonical owner's sessions are visible through an alias login
+  const s = new Store(mkdtempSync(join(tmpdir(), "als-")));
+  const m = s.create(await h("alice@example.com"), "mock", "/tmp", "t");
+  assert.ok(s.get(await h("alice-gh@example.com"), m.id));
+  assert.equal(s.get(await h("bob@example.com"), m.id), null);
+  // allow-list may name the canonical identity (aliases pass) ...
+  const b = new Auth({ ...base, allowedUsers: ["alice@example.com"] });
+  assert.equal(await b.identify({ headers: { "cf-access-jwt-assertion": await tok("alice@gmail.example") } }), "alice@example.com");
+  assert.equal(await b.identify({ headers: { "cf-access-jwt-assertion": await tok("bob@example.com") } }), null);
+  // ... or the alias itself
+  const c = new Auth({ ...base, allowedUsers: ["alice-gh@example.com"] });
+  assert.equal(await c.identify({ headers: { "cf-access-jwt-assertion": await tok("alice-gh@example.com") } }), "alice@example.com");
+  srv.close();
+});
+
+test("writeEnvFile records HEARTH_USER_ALIASES on create and on update", async () => {
+  const { writeEnvFile, parseEnv } = await import("../dist/platform.js");
+  const { readFileSync } = await import("node:fs");
+  const f = join(mkdtempSync(join(tmpdir(), "ev-")), "env");
+  writeEnvFile(f, {}, { userAliases: "a@x=b@x" }, "linux", "/home/u");
+  assert.equal(parseEnv(readFileSync(f, "utf8")).HEARTH_USER_ALIASES, "a@x=b@x");
+  const w = writeEnvFile(f, { userAliases: "a@x=b@x,c@x=b@x" }, {}, "linux", "/home/u");
+  assert.deepEqual(w.changed, ["HEARTH_USER_ALIASES"]);
+  assert.equal(parseEnv(readFileSync(f, "utf8")).HEARTH_USER_ALIASES, "a@x=b@x,c@x=b@x");
+  const f2 = join(mkdtempSync(join(tmpdir(), "ev-")), "env");
+  writeEnvFile(f2, {}, {}, "linux", "/home/u");
+  assert.equal(parseEnv(readFileSync(f2, "utf8")).HEARTH_USER_ALIASES, undefined);
+});
