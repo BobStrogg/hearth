@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.3
 - `HEARTH_USER_ALIASES` (`alias=canonical` pairs; `hearth service install --user-aliases …`): one person signing in
   through several Access login methods (email PIN, GitHub, Google) keeps one set of sessions. Applied before the
   allow-list and the per-user data dir; `hearth doctor` reports the alias count.
