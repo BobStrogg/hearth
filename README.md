@@ -14,10 +14,13 @@ Cursor and Devin.
 - **Phone-first chat UI.** Streaming markdown, inline images (from agent messages, tool results and markdown; tap to
   enlarge), tool-call cards, diffs, plans, approve/deny buttons, stop and rename. It also works as a PWA.
 - **Prompt queue.** Send while the agent is busy and the prompt waits in a per-session queue on the machine
-  (`sessions/<id>/queue.json`, up to 10 prompts), shown above the composer on every device. When a turn finishes
-  normally the next one runs by itself, in order. After an error, a Stop, or any other stop reason the queue pauses
-  until you press Resume. Queued prompts can be edited, reordered (↑/↓ or drag), deleted, or sent now (stops the
-  current turn first). After a Hearth restart a leftover queue waits for Resume.
+  (`sessions/<id>/queue.json`, up to 10 prompts), shown above the composer on every device. Whenever the agent is idle
+  the next one runs by itself, in order: after a turn ends (including a Stop), after the agent restarts, when Hearth
+  starts, and on a periodic check (`HEARTH_QUEUE_CHECK_MS`, default 15 s), so nothing is left waiting. If a prompt fails
+  (for example the agent crashed) the queue pauses and tries again by itself after 15 s, 1 min and 5 min, restarting the
+  agent; after that it waits for Resume. Tap a queued prompt's text to edit it in place (Enter or tapping away saves,
+  Esc cancels), drag its handle to reorder (mouse, touch, or the arrow keys on the focused handle), send it now (stops
+  the current turn first) or delete it.
 - **Notifications.** Each phone or computer can opt in (🔔 on the session list) to Web Push notifications when an
   agent finishes a turn or is waiting for your approval, even with Hearth closed. Skipped while you're looking at that
   session. Standard VAPID Web Push, encrypted end to end, no third-party account; on iPhone/iPad add Hearth to the

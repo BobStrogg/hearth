@@ -234,10 +234,10 @@ test("PromptQueue: persistence, ordering, edit/move/delete, cap, writes only on 
   q.edit(c.id, ""); assert.deepEqual(q.items[0].content.map((x) => x.type), ["image"]); // image-only is fine
   q.remove(b.id); assert.throws(() => q.remove(b.id), /gone/);
   assert.deepEqual(JSON.parse(readFileSync(f, "utf8")).items.map((i) => i.id), [c.id, a.id]);
-  // reload (restart): same order, paused in memory without rewriting the file
+  // reload (restart): same order, NOT paused (the server drains it when the agent is idle), file untouched
   const st = ino();
   const r = new PromptQueue(f);
-  assert.deepEqual(r.items.map((i) => i.id), [c.id, a.id]); assert.equal(r.paused, true); assert.match(r.reason, /restarted/);
+  assert.deepEqual(r.items.map((i) => i.id), [c.id, a.id]); assert.equal(r.paused, false); assert.equal(r.reason, null);
   assert.equal(ino(), st);
   r.setPaused(false); assert.equal(ino(), st); // back to the persisted state: still no write
   assert.equal(r.shift().id, c.id);

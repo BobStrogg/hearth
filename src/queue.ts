@@ -31,8 +31,9 @@ export class PromptQueue {
         this.items = (Array.isArray(j.items) ? j.items : []).filter((i) => i && typeof i.id === "string" && Array.isArray(i.content)).slice(0, QUEUE_MAX);
         this.paused = !!j.paused && this.items.length > 0;
         this.written = this.serialize();
-        // A fresh process never has a turn in flight, so leftover items wait for Resume (in memory only: no write).
-        if (this.items.length) { this.paused = true; this.reason = j.paused ? "paused" : "Hearth restarted"; }
+        // A fresh process never has a turn in flight: leftover items (even ones paused by a failure) run again as soon
+        // as Hearth starts and the agent is free (the server kicks every session that has a queue).
+        this.paused = false; this.reason = null;
       }
     } catch { this.items = []; this.paused = false; }
   }

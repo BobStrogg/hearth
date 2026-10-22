@@ -117,7 +117,7 @@ test("renders image blocks, markdown images, tool images; lightbox; SVG only via
   const txt = await page.$eval(".log", (l) => l.textContent);
   assert.match(txt, /!\[bad\]\(javascript:alert\(1\)\)/);
   await page.waitForFunction(() => /out \(couldn't be shown/.test(document.querySelector(".log").textContent), { timeout: 5000 });
-  assert.equal(await page.$$eval(".log svg, .log script, .log a[href^='javascript']", (x) => x.length), 0, "no inline svg/script");
+  assert.equal(await page.$$eval(".log svg:not(svg.ico[data-icon]), .log script, .log a[href^='javascript']", (x) => x.length), 0, "no inline svg/script (other than our own icons)");
   assert.equal(await page.evaluate(() => window.__pwned), undefined);
   // tool card with images is open; base64 isn't dumped into the raw output
   assert.ok(await page.$eval(".tool:last-of-type", (d) => d.open));

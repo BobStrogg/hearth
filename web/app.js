@@ -9,6 +9,35 @@ const h = (tag, attrs = {}, ...kids) => {
   for (const k of kids.flat()) if (k != null) e.append(k.nodeType ? k : document.createTextNode(String(k)));
   return e;
 };
+// Inline SVG icons: some browsers (the Tesla one in particular) ship few fonts, so emoji and symbol glyphs can show
+// as boxes or the wrong shape. Every UI icon is drawn here instead, in the current text colour.
+const ICONS = {
+  back: '<path d="M15 18l-6-6 6-6"/>',
+  more: '<circle cx="5" cy="12" r="1.7" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.7" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1.7" fill="currentColor" stroke="none"/>',
+  keyboard: '<rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10"/>',
+  minus: '<path d="M5 12h14"/>', plus: '<path d="M12 5v14M5 12h14"/>',
+  folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+  file: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/>',
+  bell: '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>',
+  home: '<path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/>',
+  clip: '<path d="M21 11.5l-8.6 8.6a5 5 0 0 1-7.1-7.1l8.6-8.6a3.3 3.3 0 0 1 4.7 4.7l-8.6 8.6a1.7 1.7 0 0 1-2.4-2.4l7.9-7.9"/>',
+  image: '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="M21 15l-5-5L5 21"/>',
+  sliders: '<path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/>',
+  check: '<path d="M5 12l5 5 9-10"/>', x: '<path d="M6 6l12 12M18 6L6 18"/>',
+  pending: '<circle cx="12" cy="12" r="7"/>',
+  progress: '<circle cx="12" cy="12" r="7"/><path d="M12 5a7 7 0 0 1 0 14z" fill="currentColor"/>',
+  dot: '<circle cx="12" cy="12" r="3" fill="currentColor" stroke="none"/>',
+  next: '<path d="M10 7l5 5-5 5"/>',
+  grip: '<g fill="currentColor" stroke="none"><circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/></g>',
+  play: '<path d="M8 5l11 7-11 7z" fill="currentColor"/>',
+  trash: '<path d="M4 7h16M10 11v6M14 11v6M9 7V4h6v3"/><path d="M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13"/>',
+};
+const ico = (name, cls = "") => {
+  const w = document.createElement("span");
+  w.innerHTML = `<svg class="ico ${cls}" data-icon="${name}" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${ICONS[name] || ""}</svg>`;
+  return w.firstChild;
+};
+for (const [sel, name] of [["#back", "back"], ["#menu", "more"], ["#kbm", "keyboard"], ["#kbdm", "minus"], ["#kbdp", "plus"]]) { const b = document.querySelector(sel); if (b) b.replaceChildren(ico(name)); }
 async function api(method, path, body) {
   const r = await fetch(path, { method, headers: { "content-type": "application/json", "x-hearth-csrf": "1" }, body: body ? JSON.stringify(body) : undefined, credentials: "same-origin" });
   const j = await r.json().catch(() => ({}));
@@ -53,8 +82,8 @@ async function showList() {
     h("div", { class: "meta" }, `${name(s.agentId)} · ${short(s.cwd)} · ${ago(s.lastActivity)}`)));
   $("#view").replaceChildren(
     h("div", { class: "toolbar" }, h("span", { class: "muted" }, me.user), h("div", { class: "row" },
-      me.files ? h("button", { onclick: () => { location.hash = "#/files"; }, title: "Browse, download and upload files on this computer" }, "📁 Files") : null,
-      me.push ? h("button", { onclick: notifySheet, title: "Notifications on this device", "aria-label": "Notifications" }, "🔔") : null,
+      me.files ? h("button", { onclick: () => { location.hash = "#/files"; }, title: "Browse, download and upload files on this computer" }, ico("folder"), " Files") : null,
+      me.push ? h("button", { onclick: notifySheet, title: "Notifications on this device", "aria-label": "Notifications" }, ico("bell")) : null,
       h("button", { onclick: importSessions }, "Import existing"), h("button", { class: "primary", onclick: newSession }, "+ New session"))),
     items.length ? h("ul", { class: "list" }, items) : h("p", { class: "muted center" }, "No sessions yet."), versionBar());
 }
@@ -101,8 +130,8 @@ async function newSession() {
     const r = await api("GET", "/api/fs" + (p ? `?path=${encodeURIComponent(p)}` : ""));
     cwd = r.path; pathEl.textContent = short(r.path);
     dirs.replaceChildren(
-      ...(r.parent ? [h("li", { onclick: () => browse(r.parent) }, "‹ ..")] : []),
-      ...r.dirs.map((d) => h("li", { onclick: () => browse(r.path.replace(/\/$/, "") + "/" + d) }, "📁 " + d)));
+      ...(r.parent ? [h("li", { onclick: () => browse(r.parent) }, ico("back"), " ..")] : []),
+      ...r.dirs.map((d) => h("li", { onclick: () => browse(r.path.replace(/\/$/, "") + "/" + d) }, ico("folder"), " " + d)));
   }
   const err = h("p", { class: "err" });
   sheet.replaceChildren(h("div", { class: "sheet-body" },
@@ -239,40 +268,127 @@ class Chat {
     this.input.value = ""; this.grow();
   }
   qsend(o) { if (this.ws?.readyState === 1) this.ws.send(JSON.stringify(o)); }
-  /** Queued prompts: a compact list above the composer (edit, reorder, delete, send now, resume). */
+  /**
+   * Queued prompts: a compact list above the composer. Tap/click a prompt's text to edit it in place (Enter or leaving
+   * the field saves, Esc cancels); drag the handle to reorder (pointer events: mouse, touch, the Tesla screen; arrow
+   * keys on the focused handle do the same); ▶ sends it now; the trash can deletes it.
+   */
   renderQueue() {
+    if (this.qDrag) { this.qDirty = true; return; } // don't pull the list out from under a drag; redraw on drop
     const q = this.queue, n = q.items.length;
-    this.qBox.hidden = !n; if (!n) { this.qBox.replaceChildren(); this.qEdit = null; return; }
-    if (this.qEdit && !q.items.some((i) => i.id === this.qEdit)) this.qEdit = null;
+    // keep an edit in progress (its text and caret) across redraws caused by other devices or the queue draining
+    const ed = this.qBox.querySelector("textarea.qedit");
+    if (ed) { ed.dataset.gone = "1"; if (this.qEdit) this.qDraft = { id: this.qEdit, text: ed.value, a: ed.selectionStart, b: ed.selectionEnd, focused: document.activeElement === ed }; }
+    const focusGrip = this.qFocusGrip; this.qFocusGrip = null;
+    this.qBox.hidden = !n; if (!n) { this.qBox.replaceChildren(); this.qEdit = null; this.qDraft = null; this.qSig = null; return; }
+    if (this.qEdit && !q.items.some((i) => i.id === this.qEdit)) { this.qEdit = null; this.qDraft = null; }
+    // Nothing visible changed (e.g. the server echoing a move or edit we already show): keep the nodes, so a tap that
+    // is in progress on them still lands.
+    const sig = JSON.stringify([q.items.map((i) => [i.id, i.text, i.attachments]), q.paused, q.reason, q.max, !!this.busy, this.qEdit]);
+    if (sig === this.qSig && !ed && !focusGrip && this.qBox.firstChild) return;
+    this.qSig = sig;
     const head = h("div", { class: "qhead" }, h("span", {}, `Queued ${n}/${q.max}`),
-      h("span", { class: "qwhy" }, q.paused ? `· Paused${q.reason ? `: ${q.reason}` : ""}` : "· runs after the current prompt"),
+      h("span", { class: "qwhy" }, q.paused ? `· Paused${q.reason ? `: ${q.reason}` : ""}` : this.busy ? "· runs after the current prompt" : "· starting…"),
       q.paused ? h("button", { class: "qbtn qresume", title: "Run the next queued prompt and continue", onclick: () => this.qsend({ type: "queue_resume" }) }, "Resume") : null);
     const list = h("ol", { class: "qlist" });
+    let focusEd = null;
+    const startEdit = (id) => { this.qNext = null; if (this.qEdit === id) return; this.qEdit = id; this.qDraft = null; this.renderQueue(); };
     q.items.forEach((it, i) => {
-      const li = h("li", { class: "qitem", draggable: this.qEdit ? false : "true",
-        ondragstart: (e) => { e.dataTransfer.setData("text/x-hearth-q", it.id); e.dataTransfer.effectAllowed = "move"; li.classList.add("drag"); },
-        ondragend: () => li.classList.remove("drag"),
-        ondragover: (e) => { if ([...e.dataTransfer.types].includes("text/x-hearth-q")) { e.preventDefault(); li.classList.add("over"); } },
-        ondragleave: () => li.classList.remove("over"),
-        ondrop: (e) => { e.preventDefault(); li.classList.remove("over"); const id = e.dataTransfer.getData("text/x-hearth-q"); if (id && id !== it.id) this.qsend({ type: "queue_move", id, to: i }); } });
+      const li = h("li", { class: "qitem" }); li.dataset.id = it.id;
+      const grip = h("button", { class: "qgrip", type: "button", title: "Drag to reorder (or use the arrow keys)", "aria-label": `Reorder: position ${i + 1} of ${n}. Drag, or press up/down arrow keys`,
+        onkeydown: (e) => {
+          const to = e.key === "ArrowUp" ? i - 1 : e.key === "ArrowDown" ? i + 1 : e.key === "Home" ? 0 : e.key === "End" ? n - 1 : null;
+          if (to == null) return; e.preventDefault();
+          if (to >= 0 && to < n && to !== i) { this.qFocusGrip = it.id; this.qsend({ type: "queue_move", id: it.id, to }); }
+        } }, ico("grip"));
+      grip.addEventListener("pointerdown", (e) => this.qDragStart(e, li, it.id, i));
+      li.append(grip);
       if (this.qEdit === it.id) {
-        const ta = h("textarea", { class: "qedit", rows: 2, "aria-label": "Edit queued prompt" }); ta.value = it.text;
-        const save = () => { this.qEdit = null; this.qsend({ type: "queue_edit", id: it.id, text: ta.value }); this.renderQueue(); };
-        ta.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey && !matchMedia("(pointer: coarse)").matches) { e.preventDefault(); save(); } else if (e.key === "Escape") { this.qEdit = null; this.renderQueue(); } });
-        li.append(ta, h("div", { class: "qacts" }, h("button", { class: "qbtn", onclick: save }, "Save"), h("button", { class: "qbtn", onclick: () => { this.qEdit = null; this.renderQueue(); } }, "Cancel")));
-        setTimeout(() => ta.focus(), 0);
+        const ta = h("textarea", { class: "qedit", rows: 2, "aria-label": "Edit queued prompt. Enter saves, Escape cancels" });
+        const d = this.qDraft?.id === it.id ? this.qDraft : null;
+        ta.value = d ? d.text : it.text;
+        let done = false;
+        const finish = (save) => {
+          if (done || ta.dataset.gone) return; done = true;
+          const t = ta.value.trim();
+          // tapping another prompt's text while editing: that tap blurs this field first, so open that one next
+          this.qEdit = save ? this.qNext || null : null; this.qNext = null; this.qDraft = null;
+          if (save && t !== it.text.trim() && (t || it.attachments)) this.qsend({ type: "queue_edit", id: it.id, text: ta.value });
+          this.renderQueue();
+          const tx = this.qBox.querySelector(`li[data-id="${it.id}"] .qtext`); if (tx && !save) tx.focus();
+        };
+        ta.addEventListener("keydown", (e) => {
+          if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); finish(true); }
+          else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); finish(false); }
+        });
+        ta.addEventListener("blur", () => finish(true));
+        const cancel = h("button", { class: "qbtn qcancel", type: "button", title: "Cancel the edit (Esc)", "aria-label": "Cancel edit", onclick: () => finish(false) }, ico("x"));
+        cancel.addEventListener("pointerdown", (e) => e.preventDefault()); // keep the field focused so blur doesn't save first
+        cancel.addEventListener("mousedown", (e) => e.preventDefault());
+        li.classList.add("editing"); li.append(ta, h("div", { class: "qacts" }, cancel));
+        if (!d || d.focused) focusEd = () => { ta.focus(); const a = d ? d.a : ta.value.length, b = d ? d.b : ta.value.length; try { ta.setSelectionRange(a, b); } catch { /* ignore */ } };
       } else {
-        li.append(h("span", { class: "qtext", title: it.text, onclick: () => { this.qEdit = it.id; this.renderQueue(); } }, it.text || "(attachment)", it.attachments ? h("span", { class: "muted" }, ` +${it.attachments} 📎`) : null),
-          h("div", { class: "qacts" },
-            h("button", { class: "qbtn", title: "Move up", "aria-label": "Move up", disabled: i === 0, onclick: () => this.qsend({ type: "queue_move", id: it.id, to: i - 1 }) }, "↑"),
-            h("button", { class: "qbtn", title: "Move down", "aria-label": "Move down", disabled: i === n - 1, onclick: () => this.qsend({ type: "queue_move", id: it.id, to: i + 1 }) }, "↓"),
-            h("button", { class: "qbtn", title: "Edit", "aria-label": "Edit", onclick: () => { this.qEdit = it.id; this.renderQueue(); } }, "✎"),
-            h("button", { class: "qbtn", title: this.busy ? "Stop the current prompt and send this now" : "Send this now", "aria-label": "Send now", onclick: () => this.qsend({ type: "queue_send_now", id: it.id }) }, "▶"),
-            h("button", { class: "qbtn qdel", title: "Delete", "aria-label": "Delete", onclick: () => this.qsend({ type: "queue_delete", id: it.id }) }, "✕")));
+        const tx = h("span", { class: "qtext", role: "button", tabindex: "0", title: "Tap to edit", "aria-label": `Edit queued prompt: ${it.text || "attachment"}`,
+          onclick: () => startEdit(it.id),
+          onpointerdown: () => { if (this.qEdit && this.qEdit !== it.id) this.qNext = it.id; },
+          onkeydown: (e) => { if (e.key === "Enter" || e.key === " " || e.key === "F2") { e.preventDefault(); startEdit(it.id); } } },
+          it.text || "(attachment)", it.attachments ? h("span", { class: "muted" }, ` +${it.attachments} `, ico("clip")) : null);
+        li.append(tx, h("div", { class: "qacts" },
+          h("button", { class: "qbtn", type: "button", title: this.busy ? "Stop the current prompt and send this now" : "Send this now", "aria-label": "Send now", onclick: () => this.qsend({ type: "queue_send_now", id: it.id }) }, ico("play")),
+          h("button", { class: "qbtn qdel", type: "button", title: "Delete", "aria-label": "Delete", onclick: () => this.qsend({ type: "queue_delete", id: it.id }) }, ico("trash"))));
       }
       list.append(li);
     });
     this.qBox.replaceChildren(head, list);
+    if (focusEd) focusEd();
+    if (focusGrip) this.qBox.querySelector(`li[data-id="${focusGrip}"] .qgrip`)?.focus();
+  }
+  /** Reorder by dragging a queued prompt's handle; the new position is sent to the server when it is dropped. */
+  qDragStart(e, li, id, from) {
+    if (e.button > 0 || this.qDrag) return;
+    e.preventDefault();
+    const grip = e.currentTarget, list = li.parentElement;
+    try { grip.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+    const d = this.qDrag = { id, from, li, list, y0: e.clientY, top0: li.offsetTop, moved: false, pid: e.pointerId };
+    const place = (y) => {
+      d.y = y;
+      const want = d.top0 + (y - d.y0); // where the item's top should be, in list coordinates
+      const mid = want + li.offsetHeight / 2;
+      const others = [...list.children].filter((x) => x !== li);
+      let before = null; for (const o of others) { if (mid < o.offsetTop + o.offsetHeight / 2) { before = o; break; } }
+      if (before !== li.nextSibling) { list.insertBefore(li, before); try { grip.setPointerCapture(d.pid); } catch { /* ignore */ } } // moving the node drops the capture
+      li.style.transform = `translateY(${want - li.offsetTop}px)`;
+    };
+    const auto = () => { // scroll the list while the finger is near its top or bottom edge
+      if (this.qDrag !== d) return;
+      const r = list.getBoundingClientRect(), y = d.y ?? d.y0, edge = 28;
+      const dy = y < r.top + edge ? -8 : y > r.bottom - edge ? 8 : 0;
+      if (dy && d.moved) { const st = list.scrollTop; list.scrollTop += dy; if (list.scrollTop !== st) { d.y0 -= list.scrollTop - st; place(y); } }
+      d.raf = requestAnimationFrame(auto);
+    };
+    const move = (ev) => {
+      if (ev.pointerId !== d.pid) return;
+      if (!d.moved && Math.abs(ev.clientY - d.y0) < 4) return;
+      if (!d.moved) { d.moved = true; li.classList.add("drag"); list.classList.add("dragging"); }
+      ev.preventDefault(); place(ev.clientY);
+    };
+    const end = (ev) => {
+      if (ev.pointerId !== d.pid) return;
+      removeEventListener("pointermove", move, true); removeEventListener("pointerup", end, true); removeEventListener("pointercancel", end, true);
+      cancelAnimationFrame(d.raf);
+      li.classList.remove("drag"); list.classList.remove("dragging"); li.style.transform = "";
+      const to = [...list.children].indexOf(li);
+      this.qDrag = null;
+      if (d.moved && ev.type === "pointerup" && to >= 0 && to !== from) {
+        this.qsend({ type: "queue_move", id, to });
+        const items = this.queue.items, k = items.findIndex((x) => x.id === id); // show the new order straight away
+        if (k >= 0) { const [x] = items.splice(k, 1); items.splice(Math.min(to, items.length), 0, x); }
+      }
+      if (this.qDirty || (d.moved && to !== from)) { this.qDirty = false; this.qSig = null; this.renderQueue(); } // the server's update redraws it again in order
+    };
+    // listen on the window: the handle moves around in the list while dragging, so events may not target it
+    addEventListener("pointermove", move, true); addEventListener("pointerup", end, true); addEventListener("pointercancel", end, true);
+    d.raf = requestAnimationFrame(auto);
   }
   onMsg(m) {
     const atBottom = this.atEnd || this.endGap() < 80;
@@ -385,7 +501,7 @@ class Chat {
       }
       case "plan": {
         this.cur = null;
-        const el = h("div", { class: "card plan" }, h("strong", {}, "Plan"), h("ul", {}, (u.entries || []).map((p) => h("li", { class: p.status }, `${p.status === "completed" ? "✓" : p.status === "in_progress" ? "▸" : "○"} ${p.content}`))));
+        const el = h("div", { class: "card plan" }, h("strong", {}, "Plan"), h("ul", {}, (u.entries || []).map((p) => h("li", { class: p.status }, ico(p.status === "completed" ? "check" : p.status === "in_progress" ? "next" : "pending"), ` ${p.content}`))));
         if (this.planEl && this.planEl === this.log.lastChild) this.planEl.replaceWith(el); else this.log.append(el);
         this.planEl = el; break;
       }
@@ -415,7 +531,7 @@ class Chat {
   }
   renderTool(t) {
     const d = t.data; const open = t.el.open;
-    const icon = { pending: "○", in_progress: "◐", completed: "✓", failed: "✗" }[d.status] || "•";
+    const icon = { pending: "pending", in_progress: "progress", completed: "check", failed: "x" }[d.status] || "dot";
     const body = h("div", { class: "tool-body" });
     // Image figures are reused across updates (same source -> same node), so re-rendering doesn't reload/re-measure them.
     const figs = new Map(); const seen = new Set();
@@ -436,7 +552,7 @@ class Chat {
       body.append(h("pre", {}, (typeof d.rawOutput === "string" ? d.rawOutput : JSON.stringify(d.rawOutput, squash, 2)).slice(0, 4000)));
     }
     t.figs = figs;
-    t.el.replaceChildren(h("summary", { class: d.status || "" }, `${icon} ${d.title || d.kind || "Tool"}`), body);
+    t.el.replaceChildren(h("summary", { class: d.status || "" }, ico(icon), ` ${d.title || d.kind || "Tool"}`), body);
     t.el.open = open || (d.content || []).some((c) => c.type === "diff") || figs.size > 0;
     this.watch(t.el);
   }
@@ -452,7 +568,7 @@ class Chat {
     const main = ["model", "mode"].map((c) => opts.find((o) => o.category === c && o.type === "select")).filter(Boolean);
     const rest = opts.filter((o) => !main.includes(o));
     this.ctl.replaceChildren(...main.map(pill),
-      ...(rest.length ? [h("button", { class: "pillbtn", "aria-label": "More settings", title: "More settings", onclick: () => this.openSettings() }, `⚙︎ ${rest.length}`)] : []));
+      ...(rest.length ? [h("button", { class: "pillbtn", "aria-label": "More settings", title: "More settings", onclick: () => this.openSettings() }, ico("sliders"), ` ${rest.length}`)] : []));
     this.ctl.hidden = !opts.length;
   }
   openSettings() {
@@ -558,7 +674,7 @@ function lightbox(img) {
 }
 function brokenImage(img) {
   if (img.dataset.broken) return; img.dataset.broken = "1";
-  img.replaceWith(h("span", { class: "muted imgbroken" }, `🖼 ${img.alt || "image"} (couldn't be shown${img.src.includes("/file?") ? ": not an image inside the session folder" : ""})`));
+  img.replaceWith(h("span", { class: "muted imgbroken" }, ico("image"), ` ${img.alt || "image"} (couldn't be shown${img.src.includes("/file?") ? ": not an image inside the session folder" : ""})`));
 }
 
 function selectChoices(o) {
@@ -630,7 +746,7 @@ function fileItem(path, e) {
       a.dataset.ok = "1"; a.click();
     } catch (x) { err.textContent = `Can't download: ${x.message === "Failed to fetch" ? "no connection to this computer" : x.message}`; err.hidden = false; }
     finally { delete a.dataset.busy; meta.textContent = `${fmtSize(e.size)} · ${ago(e.mtime)}`; }
-  } }, `📄 ${e.name}`);
+  } }, ico("file"), ` ${e.name}`);
   return h("li", { class: "card file" }, a, meta, err);
 }
 async function showFiles(rel) {
@@ -641,13 +757,13 @@ async function showFiles(rel) {
   const hidden = localStorage.getItem("hearth.hidden") === "1";
   const r = await api("GET", `/api/files?path=${encodeURIComponent(rel)}${hidden ? "&hidden=1" : ""}`);
   const segs = r.path ? r.path.split("/") : [];
-  const crumbs = h("div", { class: "crumbs" }, h("a", { href: filesHash("") }, "🏠 Home"),
+  const crumbs = h("div", { class: "crumbs" }, h("a", { href: filesHash("") }, ico("home"), " Home"),
     ...segs.flatMap((sg, i) => [" / ", h("a", { href: filesHash(segs.slice(0, i + 1).join("/")) }, sg)]));
   const join = (n) => (r.path ? r.path + "/" : "") + n;
   const list = h("ul", { class: "list files" },
-    ...(r.parent != null ? [h("li", { class: "card file", onclick: () => { location.hash = filesHash(r.parent); } }, h("span", { class: "fname" }, "‹ .."))] : []),
+    ...(r.parent != null ? [h("li", { class: "card file", onclick: () => { location.hash = filesHash(r.parent); } }, h("span", { class: "fname" }, ico("back"), " .."))] : []),
     ...r.entries.map((e) => e.dir
-      ? h("li", { class: "card file", onclick: () => { location.hash = filesHash(join(e.name)); } }, h("span", { class: "fname" }, `📁 ${e.name}`), h("span", { class: "meta" }, ago(e.mtime)))
+      ? h("li", { class: "card file", onclick: () => { location.hash = filesHash(join(e.name)); } }, h("span", { class: "fname" }, ico("folder"), ` ${e.name}`), h("span", { class: "meta" }, ago(e.mtime)))
       : fileItem(join(e.name), e)));
   if (!r.entries.length) list.append(h("li", { class: "muted center" }, "Empty folder."));
   const prog = h("div", { class: "uploads" });
@@ -762,7 +878,8 @@ const KB = (() => {
   if (TESLA) root.classList.add("tesla");
   function apply() {
     const v = window.visualViewport, k = on();
-    let hgt = v ? v.height : window.innerHeight; const top = v ? v.offsetTop : 0;
+    let hgt = v && v.height > 0 ? v.height : window.innerHeight; const top = v && v.height > 0 ? v.offsetTop : 0;
+    if (!(hgt > 0)) { b.classList.remove("vp"); return; } // not laid out yet: CSS (100dvh) until the first real size
     if (k) hgt = Math.min(hgt, Math.round(window.innerHeight * frac));
     root.style.setProperty("--apph", `${Math.round(hgt)}px`); root.style.setProperty("--appt", `${Math.round(top)}px`);
     b.classList.add("vp"); b.classList.toggle("kbm", k);
@@ -771,6 +888,7 @@ const KB = (() => {
     const sz = `${Math.round(hgt)}:${Math.round(top)}`; if (sz === lastSize) return; lastSize = sz; // only when the size really changed
     cancelAnimationFrame(raf); raf = requestAnimationFrame(() => { // keep the latest message and the field you're typing in visible
       if (chat && chat.atEnd) chat.toEnd(); // only if you were following the end (scrolled-back reading stays put)
+      if (chat) chat.fillScreen(); // a taller app may need more history to fill it
       const a = document.activeElement; if (isField(a)) a.scrollIntoView({ block: "nearest" });
     });
   }
@@ -805,7 +923,7 @@ async function route() {
     } else await showList();
   } catch (e) {
     if (e.message === "locked") return;
-    $("#view").replaceChildren(h("p", { class: "err center" }, e.message), ...(fm ? [h("p", { class: "center" }, h("a", { href: "#/files" }, "🏠 Files home"))] : []));
+    $("#view").replaceChildren(h("p", { class: "err center" }, e.message), ...(fm ? [h("p", { class: "center" }, h("a", { href: "#/files" }, ico("home"), " Files home"))] : []));
   }
 }
 addEventListener("hashchange", route);

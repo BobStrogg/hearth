@@ -380,15 +380,15 @@ test("history paging over WebSocket: tail on open, cursor pages, live entries me
   assert.equal(r2.items.length, 2); s2.close();
 });
 
-test("prompt queue: FIFO auto-advance, live sync, edit/move/delete, pause on cancel and error, resume, send now, persisted", async () => {
+test("prompt queue: FIFO auto-advance, live sync, edit/move/delete, Stop continues, error pauses, resume, send now, persisted", async () => {
   const U = "alice@example.com";
   const qid = (await api(U, "POST", "/api/sessions", { agentId: "mock", cwd: join(root, "proj"), title: "queue" })).json.id;
   const a = await ws(U, qid), b = await ws(U, qid); // two devices
   // wait for a message that arrives after `mark` (the ws helper's until() also matches older messages)
   const mark = (s) => s.msgs.length;
   const after = (s, m0, pred, ms = 8000) => new Promise((res, rej) => {
-    const t0 = Date.now();
-    const tick = () => { const f = s.msgs.slice(m0).find(pred); if (f) return res(f); if (Date.now() - t0 > ms) return rej(new Error("timeout; last: " + JSON.stringify(s.msgs.slice(-3)).slice(0, 600))); setTimeout(tick, 10); };
+    const t0 = Date.now(), where = new Error().stack.split("\n").find((l) => l.includes("e2e.test") && !l.includes(":389:") && !l.includes(":390:"))?.trim();
+    const tick = () => { const f = s.msgs.slice(m0).find(pred); if (f) return res(f); if (Date.now() - t0 > ms) return rej(new Error("timeout at " + where + "; last: " + JSON.stringify(s.msgs.slice(-3)).slice(0, 600))); setTimeout(tick, 10); };
     tick();
   });
   const isQ = (pred) => (m) => m.type === "queue" && pred(m);
@@ -427,15 +427,30 @@ test("prompt queue: FIFO auto-advance, live sync, edit/move/delete, pause on can
   st = await after(a, m0, isQ((m) => m.items.length === 2 && m.items[0].id === G));
   assert.deepEqual(st.items.map((i) => i.text), ["G", "F edited"]);
 
-  // 3) user cancel -> the queue pauses; nothing auto-runs; Resume continues it
+  // 3) user Stop -> that prompt ends; the queue carries on by itself, in order (no pause, no Resume needed)
   m0 = mark(a);
   send(a, { type: "cancel" });
+  await after(a, m0, (m) => m.type === "prompt_done" && m.stopReason === "cancelled");
+  await until(() => prompts().length === 6);
+  assert.deepEqual(prompts().slice(3), ["slow D", "G", "F edited"]);
+  await after(a, m0, isQ((m) => m.items.length === 0));
+  assert.equal(a.msgs.slice(m0).some(isQ((m) => m.paused)), false, "a Stop doesn't pause the queue");
+  await until(() => h.live.get(qid).turnActive === false);
+
+  // 4) send now: cancels the current turn and runs that item next; it fails -> the queue pauses with the error
+  //    (and will retry by itself later); a prompt sent meanwhile runs directly; Resume continues the queue now
+  send(a, { type: "prompt", text: "slow X" });
+  await until(() => prompts().at(-1) === "slow X");
+  m0 = mark(a);
+  send(a, { type: "prompt", text: "Y" }); send(a, { type: "prompt", text: "explode now" });
+  st = await after(a, m0, isQ((m) => m.items.length === 2));
+  m0 = mark(a);
+  send(a, { type: "queue_send_now", id: st.items[1].id });
   st = await after(a, m0, isQ((m) => m.paused));
-  assert.match(st.reason, /stopped/);
-  await new Promise((r) => setTimeout(r, 300));
-  assert.equal(prompts().length, 4);
+  assert.match(st.reason, /failed \(trying again in \d+ s\): .*exploded/);
+  assert.deepEqual(st.items.map((i) => i.text), ["Y"]);
+  assert.deepEqual(prompts().slice(-2), ["slow X", "explode now"]);
   assert.equal(JSON.parse(readFileSync(file, "utf8")).paused, true);
-  // sending while paused and idle runs it directly; the queue stays paused
   await until(() => h.live.get(qid).turnActive === false);
   m0 = mark(a);
   send(a, { type: "prompt", text: "direct" });
@@ -445,36 +460,21 @@ test("prompt queue: FIFO auto-advance, live sync, edit/move/delete, pause on can
   m0 = mark(a);
   send(a, { type: "queue_resume" });
   await after(a, m0, isQ((m) => m.items.length === 0));
-  await until(() => prompts().length === 7);
-  assert.deepEqual(prompts().slice(4), ["direct", "G", "F edited"]);
-  await until(() => h.live.get(qid).turnActive === false);
-
-  // 4) send now: cancels the current turn and runs that item next; it fails -> the queue pauses with the error
-  send(a, { type: "prompt", text: "slow X" });
-  await until(() => prompts().at(-1) === "slow X");
-  m0 = mark(a);
-  send(a, { type: "prompt", text: "Y" }); send(a, { type: "prompt", text: "explode now" });
-  st = await after(a, m0, isQ((m) => m.items.length === 2));
-  m0 = mark(a);
-  send(a, { type: "queue_send_now", id: st.items[1].id });
-  st = await after(a, m0, isQ((m) => m.paused));
-  assert.match(st.reason, /failed: .*exploded/);
-  assert.deepEqual(st.items.map((i) => i.text), ["Y"]);
-  assert.deepEqual(prompts().slice(-2), ["slow X", "explode now"]);
+  await until(() => prompts().at(-1) === "Y");
   await until(() => h.live.get(qid).turnActive === false);
 
   // 5) cap, with a clear message
   send(a, { type: "prompt", text: "slow cap" });
   await until(() => prompts().at(-1) === "slow cap");
   m0 = mark(a);
-  for (let i = 0; i < 10; i++) send(a, { type: "prompt", text: `n${i}` });
+  for (let i = 0; i < 11; i++) send(a, { type: "prompt", text: `n${i}` });
   const full = await after(a, m0, (m) => m.type === "error" && /queue is full/i.test(m.message));
   assert.match(full.message, /10/);
   await after(a, m0, isQ((m) => m.items.length === 10));
-  // 6) persisted: a fresh reader of the session dir (as after a Hearth restart) sees the same queue, paused
+  // 6) persisted: a fresh reader of the session dir (as after a Hearth restart) sees the same queue, ready to drain
   const { PromptQueue } = await import("../dist/queue.js");
   const re = new PromptQueue(file);
-  assert.equal(re.items.length, 10); assert.equal(re.items[0].content[0].text, "Y"); assert.equal(re.paused, true);
+  assert.equal(re.items.length, 10); assert.equal(re.items[0].content[0].text, "n0"); assert.equal(re.paused, false);
   m0 = mark(a);
   send(a, { type: "queue_clear" });
   await after(a, m0, isQ((m) => m.items.length === 0));

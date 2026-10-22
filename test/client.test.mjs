@@ -63,14 +63,14 @@ test("reconnect races (drop + tab refocus) never duplicate streamed text", async
   chat.close(); b.w.close();
 });
 
-test("queue UI: 'Queue' while busy, compact list with actions, live sync, Resume after a stop", async () => {
+test("queue UI: 'Queue' while busy, SVG icons, tap-to-edit, keyboard reorder, Stop carries on", async () => {
   const r = await fetch(base + "/api/sessions", { method: "POST", headers: { origin: base, "x-hearth-csrf": "1", "content-type": "application/json" }, body: JSON.stringify({ agentId: "mock", cwd: join(root, "p") }) });
   const sid = (await r.json()).id;
   const b = browser(`#/s/${sid}`);
   await until(() => b.sockets.some((s) => s.readyState === 1) && b.$(".composer button.primary"));
   const btn = b.$(".composer button.primary"), ta = b.$(".composer textarea");
   assert.equal(btn.textContent, "Send"); assert.equal(b.$(".queue").hidden, true);
-  ta.value = "slow one"; btn.click();
+  ta.value = "slowest one"; btn.click();
   await until(() => btn.textContent === "Queue");
   ta.value = "second"; btn.click(); ta.value = "third"; btn.click();
   await until(() => b.$(".queue .qlist") && b.$(".queue .qlist").children.length === 2);
@@ -78,19 +78,37 @@ test("queue UI: 'Queue' while busy, compact list with actions, live sync, Resume
   assert.match(b.$(".qhead").textContent, /Queued 2\/10/);
   const items = () => [...b.$(".qlist").children].map((li) => li.querySelector(".qtext")?.textContent);
   assert.deepEqual(items(), ["second", "third"]);
-  // move down with the ↓ button, then delete with ✕
-  b.$(".qlist li .qacts button[aria-label='Move down']").click();
+  // icons are inline SVG (no emoji/symbol glyphs that the Tesla browser can't draw); no pencil button
+  const li0 = () => b.$(".qlist li");
+  assert.equal(li0().querySelector("button[aria-label='Edit']"), null, "no edit button");
+  assert.ok(li0().querySelector(".qgrip svg[data-icon='grip']"));
+  assert.ok(li0().querySelector("button[aria-label='Send now'] svg[data-icon='play']"));
+  assert.ok(li0().querySelector("button[aria-label='Delete'] svg[data-icon='trash']"));
+  assert.doesNotMatch(b.$(".queue").textContent, /[\u2190-\u2BFF\u{1F000}-\u{1FFFF}]/u);
+  // reorder from the keyboard: arrow down on the focused handle
+  li0().querySelector(".qgrip").dispatchEvent(new b.w.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
   await until(() => items()[0] === "third");
-  // edit inline
-  b.$(".qlist li .qacts button[aria-label='Edit']").click();
-  const ed = b.$(".qlist textarea.qedit"); assert.ok(ed); ed.value = "third, edited";
-  [...b.$(".qlist li .qacts").querySelectorAll("button")].find((x) => x.textContent === "Save").click();
+  assert.equal(b.w.document.activeElement?.closest("li")?.dataset.id, li0().nextSibling.dataset.id, "focus follows the moved item");
+  // tap the text to edit in place; Esc cancels
+  const key = (el, k, o = {}) => el.dispatchEvent(new b.w.KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true, ...o }));
+  li0().querySelector(".qtext").click();
+  await until(() => b.$(".qlist textarea.qedit") && b.w.document.activeElement === b.$(".qlist textarea.qedit"));
+  let ed = b.$(".qlist textarea.qedit"); ed.value = "nope"; key(ed, "Escape");
+  await until(() => !b.$(".qlist textarea.qedit"));
+  assert.equal(items()[0], "third");
+  // Enter on the focused text opens the editor too (keyboard users); Enter saves
+  key(li0().querySelector(".qtext"), "Enter");
+  await until(() => b.$(".qlist textarea.qedit"));
+  ed = b.$(".qlist textarea.qedit"); ed.value = "third, edited"; key(ed, "Enter");
   await until(() => items()[0] === "third, edited");
-  // stop the running prompt: the queue pauses and offers Resume
+  // leaving the field (blur) saves as well
+  li0().nextSibling.querySelector(".qtext").click();
+  await until(() => b.$(".qlist textarea.qedit") && b.w.document.activeElement === b.$(".qlist textarea.qedit"));
+  ed = b.$(".qlist textarea.qedit"); ed.value = "second, blurred"; ed.blur();
+  await until(() => items()[1] === "second, blurred");
+  // Stop the running prompt: the queue carries on by itself (no Resume needed)
   b.$(".composer button.danger").click();
-  await until(() => b.$(".qresume"));
-  assert.match(b.$(".qhead").textContent, /Paused/);
-  b.$(".qresume").click();
   await until(() => b.$(".queue").hidden === true, 10000);
+  assert.equal(b.$(".qresume"), null);
   b.w.__chat().close(); b.w.close();
 });

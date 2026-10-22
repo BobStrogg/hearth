@@ -74,14 +74,18 @@ figcaption { margin-top:.2rem; font-size:.75rem; }
 .queue { padding:.45rem .8rem 0; font-size:.85rem; } .queue[hidden] { display:none; }
 .qhead { display:flex; align-items:center; gap:.4rem; color:var(--muted); font-size:.78rem; margin-bottom:.3rem; } .qwhy { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .qlist { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:.3rem; max-height:calc(var(--apph, 100dvh) * .32); overflow:auto; }
-.qitem { display:flex; align-items:center; gap:.4rem; background:var(--card); border:1px solid var(--line); border-radius:10px; padding:.25rem .3rem .25rem .6rem; }
-.qitem.drag { opacity:.5; } .qitem.over { border-color:var(--acc); }
-.qtext { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; cursor:text; }
+.qitem { display:flex; align-items:center; gap:.3rem; background:var(--card); border:1px solid var(--line); border-radius:10px; padding:.25rem .3rem .25rem .1rem; position:relative; }
+.qitem.drag { z-index:2; border-color:var(--acc); box-shadow:0 6px 18px rgba(0,0,0,.45); opacity:.95; } .qlist.dragging { user-select:none; -webkit-user-select:none; }
+.qlist.dragging .qitem:not(.drag) { transition:transform .12s; }
+.qgrip { flex:0 0 auto; display:flex; align-items:center; justify-content:center; min-width:30px; min-height:34px; padding:0; border:0; background:none; color:var(--muted); cursor:grab; touch-action:none; -webkit-user-select:none; user-select:none; -webkit-touch-callout:none; }
+.qgrip:active, .qitem.drag .qgrip { cursor:grabbing; color:var(--acc); } .qgrip .ico { width:18px; height:18px; }
+.qtext { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; cursor:text; padding:.35rem .1rem; border-radius:6px; }
+.qtext:hover { background:rgba(255,255,255,.04); } .qtext:focus-visible, .qgrip:focus-visible { outline:2px solid var(--acc); outline-offset:1px; }
 .qacts { display:flex; gap:.2rem; flex:0 0 auto; }
-.qbtn { min-height:30px; min-width:30px; padding:.1rem .45rem; border-radius:99px; font-size:.8rem; color:var(--muted); }
+.qbtn { min-height:30px; min-width:30px; padding:.1rem .45rem; border-radius:99px; font-size:.8rem; color:var(--muted); display:inline-flex; align-items:center; justify-content:center; }
 .qbtn.qresume { margin-left:auto; color:var(--acc); border-color:var(--acc); } .qbtn.qdel:hover { color:var(--bad); border-color:var(--bad); }
 .qedit { flex:1; min-height:0; resize:vertical; font-size:.85rem; padding:.35rem .5rem; }
-@media (max-width:480px) { .qitem { flex-wrap:wrap; } .qitem .qacts { margin-left:auto; } }
+
 .crumbs{font-size:14px;overflow-wrap:anywhere}.crumbs a{color:inherit}
 .files .file{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px 12px;cursor:pointer}
 .files .fname{overflow-wrap:anywhere;color:inherit;text-decoration:none;flex:1}.files .meta{white-space:nowrap}
@@ -90,3 +94,9 @@ figcaption { margin-top:.2rem; font-size:.75rem; }
 .toolbar { flex-wrap:wrap; }
 .toolbar button { white-space:nowrap; } .toolbar .row { flex-wrap:wrap; justify-content:flex-end; }
 .files .file{flex-wrap:wrap}.files .file>.err{flex-basis:100%;font-size:.9em}
+
+/* Inline SVG icons (see ICONS in app.js): sized to the text, in its colour. */
+.ico { width:1.05em; height:1.05em; vertical-align:-.16em; flex:none; display:inline-block; }
+button.icon .ico { width:22px; height:22px; vertical-align:middle; }
+#kbctl button .ico { width:16px; height:16px; vertical-align:middle; }
+.qbtn .ico { width:15px; height:15px; }

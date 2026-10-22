@@ -108,9 +108,9 @@ export class LiveSession {
   }
 
   /**
-   * A prompt from the user: runs now if the agent is free, otherwise joins the queue (FIFO). After a turn ends
-   * normally the next queued prompt runs by itself; after an error, a cancel or any other stop reason the queue
-   * pauses until the user resumes it.
+   * A prompt from the user: runs now if the agent is free, otherwise joins the queue (FIFO). Whenever the agent is
+   * idle (a turn ended for any reason, including Stop; the agent restarted; Hearth started; the periodic check) the
+   * next queued prompt runs by itself. After an error the queue pauses and retries by itself with backoff.
    */
   submit(content: acp.ContentBlock[]): { queued: boolean } {
     if (!Array.isArray(content) || !content.length) throw new QueueError("empty prompt");
@@ -119,7 +119,21 @@ export class LiveSession {
     return { queued: false };
   }
   /** Resume a paused queue (or start a waiting one): runs the next prompt if the agent is free. */
-  resumeQueue() { this.queue.setPaused(false); if (!this.turnActive) this.next(); }
+  resumeQueue() { this.retries = 0; this.retryAt = 0; this.queue.setPaused(false); this.kick(); }
+
+  /** Delays before a queue paused by a failed prompt tries again by itself (then it waits for Resume). */
+  static RETRY_MS = [15_000, 60_000, 300_000];
+  private retries = 0; private retryAt = 0;
+  /**
+   * Drain the queue if the agent is free: called after every turn, by the periodic idle check, on Hearth startup and
+   * after an agent restart. Runs at most one prompt at a time, in order; the agent is respawned by prompt() if it
+   * exited. A queue paused by a failure resumes by itself once its retry time has come.
+   */
+  kick(): boolean {
+    if (!this.queue.items.length || this.turnActive || this.prompting || this.meta.state === "exited") return false;
+    if (this.queue.paused) { if (!this.retryAt || Date.now() < this.retryAt) return false; this.retryAt = 0; this.queue.setPaused(false); }
+    this.next(); return true;
+  }
   /** Run this queued prompt now: it moves to the front, and the current turn (if any) is cancelled first. */
   async sendNow(id: string) {
     const i = this.queue.items.findIndex((x) => x.id === id);
@@ -141,12 +155,18 @@ export class LiveSession {
     catch (e) { err = String((e as Error)?.message ?? e); this.emit({ type: "error", message: err }); }
     finally { this.turnActive = false; }
     const sendNow = this.sendNowPending; this.sendNowPending = false;
+    if (!err) { this.retries = 0; this.retryAt = 0; }
     if (!this.queue.items.length || this.meta.state === "exited") return;
     if (sendNow) { this.queue.setPaused(false); return this.next(); }
-    if (err) return this.queue.setPaused(true, `the last prompt failed: ${err.slice(0, 200)}`);
-    if (this.userCancelled || stop === "cancelled") return this.queue.setPaused(true, "you stopped the last prompt");
-    if (stop !== "end_turn") return this.queue.setPaused(true, `the last prompt stopped: ${stop}`);
-    if (!this.queue.paused) this.next();
+    if (err) {
+      // A failure (agent crashed, couldn't start, …) pauses the queue; it tries again by itself a few times, respawning the agent.
+      const d = LiveSession.RETRY_MS[this.retries++];
+      this.retryAt = d === undefined ? 0 : Date.now() + d;
+      const when = d === undefined ? "press Resume to try again" : `trying again in ${d < 60_000 ? `${Math.round(d / 1000)} s` : `${Math.round(d / 60_000)} min`}`;
+      return this.queue.setPaused(true, `the last prompt failed (${when}): ${err.slice(0, 200)}`);
+    }
+    // A Stop, a cancel or another stop reason (max_tokens, refusal, …) ends that prompt only: the queue carries on.
+    this.kick();
   }
 
   emit(e: LiveEvent) { for (const l of this.listeners) { try { l(e); } catch { /* ignore */ } } }
@@ -217,7 +237,11 @@ export class LiveSession {
   /** Spawn the agent (if needed), initialize, and create or load the ACP session. */
   ensureRunning(): Promise<void> {
     if (this.alive && this.conn && this.meta.agentSessionId) return Promise.resolve();
-    this.starting ??= this.start().finally(() => { this.starting = undefined; });
+    this.starting ??= this.start().then(() => {
+      // The agent (re)started: a queue paused by a failure tries again now, and a waiting queue drains.
+      if (this.retryAt) this.retryAt = 1;
+      setImmediate(() => this.kick());
+    }).finally(() => { this.starting = undefined; });
     return this.starting;
   }
 

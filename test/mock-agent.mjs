@@ -130,8 +130,9 @@ new acp.AgentSideConnection((conn) => ({
       await d.waitForExit(); const od = await d.currentOutput(); await d.release();
       await say(`A=${JSON.stringify(oa.output.trim())} exit=${ea.exitCode} status=${JSON.stringify(oa.exitStatus)} B=${ob.output} C=${ec.exitCode} D=${od.output.length},${od.truncated}`);
     }
+    if (text.includes("crashlater")) { await new Promise((r) => setTimeout(r, 300)); process.exit(3); } // the agent dies mid-turn
     if (text.includes("explode")) throw acp.RequestError.internalError({}, "mock agent exploded");
-    if (text.includes("slow")) { for (let i = 0; i < 50 && !s.cancelled; i++) await new Promise((r) => setTimeout(r, 100)); if (s.cancelled) return { stopReason: "cancelled" }; }
+    if (text.includes("slow")) { for (let i = 0, n = text.includes("slowest") ? 300 : 50; i < n && !s.cancelled; i++) await new Promise((r) => setTimeout(r, 100)); if (s.cancelled) return { stopReason: "cancelled" }; }
     for (const w of ["Hello ", "**world**", "!"]) await say(w);
     return { stopReason: "end_turn" };
   },

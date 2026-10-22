@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { homedir } from "node:os";
 import { basename, dirname, extname, join, resolve } from "node:path";
@@ -30,6 +30,8 @@ export interface Config extends AuthConfig {
   filesRoot: string;
   /** Deadline for one file-system call in the file browser (HEARTH_FILES_TIMEOUT_MS, default 15 s). */
   filesTimeoutMs: number;
+  /** How often idle sessions with queued prompts are checked (HEARTH_QUEUE_CHECK_MS, default 15 s). */
+  queueCheckMs: number;
   /** Web Push notifications (each device opts in from the UI). HEARTH_PUSH=off disables them. */
   push: boolean;
   pushSubject?: string;
@@ -49,6 +51,7 @@ export function configFromEnv(env = process.env): Config {
     files: !/^(off|0|false|no)$/i.test(env.HEARTH_FILES ?? ""),
     filesRoot: resolve(env.HEARTH_FILES_ROOT || homedir()),
     filesTimeoutMs: Math.max(1000, Number(env.HEARTH_FILES_TIMEOUT_MS) || 15000),
+    queueCheckMs: Math.max(50, Number(env.HEARTH_QUEUE_CHECK_MS) || 15000),
     push: !/^(off|0|false|no)$/i.test(env.HEARTH_PUSH ?? ""),
     pushSubject: env.HEARTH_PUSH_SUBJECT || undefined,
     pushHosts: [...DEFAULT_PUSH_HOSTS, ...list(env.HEARTH_PUSH_HOSTS).map((h) => h.toLowerCase())],
@@ -123,6 +126,11 @@ export class Hearth {
     }
     // Daemon restart: nothing is running any more.
     for (const m of this.store.all()) if (m.state === "running" || m.state === "idle") { m.state = "stopped"; this.store.save(m); }
+    // Sessions with queued prompts left over from before the restart: load them so the idle check drains them.
+    for (const m of this.store.all()) {
+      if (m.state === "exited") continue;
+      try { if (existsSync(join(this.store.dir(m.owner, m.id), "queue.json"))) this.liveFor(m); } catch { /* unknown agent or bad id */ }
+    }
     this.server.on("upgrade", (req, sock, head) => { this.upgrade(req, sock as never, head).catch(() => sock.destroy()); });
   }
 
@@ -130,6 +138,9 @@ export class Hearth {
     return new Promise((res) => this.server.listen(this.cfg.port, this.cfg.bind, () => {
       if (process.env.HEARTH_SERVICE) { try { writeFileSync(pidFile(), String(process.pid)); } catch { /* best effort */ } }
       if (this.cfg.autoUpdate) this.scheduleAuto(10 * 60_000);
+      // Idle check: any session whose agent is free and has queued prompts runs the next one (also right after startup).
+      this.queueTimer = setInterval(() => this.kickQueues(), this.cfg.queueCheckMs); this.queueTimer.unref();
+      setTimeout(() => this.kickQueues(), Math.min(1000, this.cfg.queueCheckMs)).unref();
       res((this.server.address() as { port: number }).port);
     }));
   }
@@ -139,6 +150,8 @@ export class Hearth {
     try { this.rel = { at: Date.now(), release: await latestRelease(8000) }; } catch (e) { this.rel = { at: Date.now(), release: this.rel.release, error: String((e as Error).message) }; }
     return this.rel.release;
   }
+  private queueTimer?: NodeJS.Timeout;
+  kickQueues() { for (const l of this.live.values()) { try { l.kick(); } catch { /* next time */ } } }
   /** True while any agent is mid-turn: restarting then would cut it off. */
   busy() { return [...this.live.values()].some((l) => l.turnActive || l.meta.state === "running" || l.pending.size > 0); }
   private async versionInfo(check: boolean) {
@@ -165,7 +178,7 @@ export class Hearth {
     this.autoTimer.unref();
   }
   async close() {
-    clearTimeout(this.autoTimer);
+    clearTimeout(this.autoTimer); clearInterval(this.queueTimer);
     if (process.env.HEARTH_SERVICE) { try { if (readFileSync(pidFile(), "utf8").trim() === String(process.pid)) rmSync(pidFile(), { force: true }); } catch { /* none */ } }
     await Promise.all([...this.live.values()].map((l) => l.shutdown().catch(() => {})));
     for (const c of this.wss.clients) c.terminate();
@@ -468,6 +481,7 @@ export class Hearth {
     send({ type: "state", state: l.meta.state, title: l.meta.title });
     send({ type: "settings", options: l.options });
     send({ type: "queue", ...l.queue.view() });
+    l.kick(); // a device (re)connecting is a good moment to drain a queue that is waiting on an idle agent
     for (const [pid, p] of l.pending) send({ type: "permission", id: pid, params: p.params });
     replaying = false;
     for (const e of buffered) { const ent = (e as { entry?: { seq: number } }).entry; if (!ent || ent.seq > last) send(e); }

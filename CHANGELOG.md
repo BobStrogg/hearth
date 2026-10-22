@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.5.6
+- Prompt queue: queued prompts no longer get stuck after the agent was stopped or sat idle. The queue now drains whenever
+  the agent is free: after any turn ends (a Stop or cancel ends only that prompt; the queue carries on), after the agent
+  restarts or a device reconnects, when Hearth starts (sessions with a leftover `queue.json` are picked up without anyone
+  opening them, even if they were paused), and on a periodic idle check (`HEARTH_QUEUE_CHECK_MS`, default 15 s). A failed
+  prompt pauses the queue and it retries by itself after 15 s, 1 min and 5 min (respawning the agent), then waits for
+  Resume. One prompt at a time, in order, never sent twice.
+- Queue UI: icons are inline SVG (move handle, send now, a trash can for delete) instead of emoji/symbol glyphs, which the
+  Tesla browser's limited fonts drew wrongly. The same goes for the header (back, menu, keyboard mode, −/+), the Files and
+  notification buttons, the file browser, tool-call and plan status marks and the settings button.
+- Queue UI: no pencil button. Tap or click a queued prompt's text to edit it in place: Enter or leaving the field saves,
+  Esc (or the × next to it) cancels. The text is a focusable button for keyboard users (Enter, Space or F2 edits).
+- Queue UI: drag a prompt's handle to reorder it, with pointer events (mouse, touch, the Tesla touchscreen); the list
+  doesn't scroll under your finger and the new order is saved on the server. Arrow keys (and Home/End) on the focused
+  handle move it too. The ↑/↓ buttons are gone.
+- The queue list keeps its nodes when an update changes nothing visible, so a tap in progress isn't lost.
+
 ## 0.5.5
 - Keyboard mode: a viewport resize only jumps to the latest message if you were already following the end (reading older
   history stays put), and only when the size actually changed. Found by the macOS CI history-paging test on 0.5.4.
