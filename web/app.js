@@ -609,6 +609,30 @@ const fmtSize = (n) => n == null ? "" : n < 1024 ? `${n} B` : n < 1048576 ? `${(
 const filesHash = (p) => p ? `#/files?p=${encodeURIComponent(p)}` : "#/files";
 const rid = () => Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) => "abcdefghijklmnopqrstuvwxyz0123456789"[b % 36]).join("");
 const UPLOAD_CHUNK = 8 * 1024 * 1024;
+/**
+ * One file row. Clicking checks with the server first (same request path and cookies as the listing), so a file this
+ * computer can't read shows the reason here instead of a broken entry in the browser's download list; then it hands
+ * the real download to the browser (streamed to disk, resumable).
+ */
+function fileItem(path, e) {
+  const href = `/api/files/download?path=${encodeURIComponent(path)}`;
+  const meta = h("span", { class: "meta" }, `${fmtSize(e.size)} · ${ago(e.mtime)}`);
+  const err = h("span", { class: "err", hidden: true });
+  const a = h("a", { class: "fname", href, download: e.name, title: "Download", onclick: async (ev) => {
+    if (a.dataset.ok === "1") { delete a.dataset.ok; return; } // the checked, real click below
+    ev.preventDefault(); if (a.dataset.busy) return;
+    a.dataset.busy = "1"; err.hidden = true; meta.textContent = "Checking…";
+    try {
+      const r = await fetch(href + "&check=1", { credentials: "same-origin", cache: "no-store" });
+      const j = await r.json().catch(() => ({}));
+      if (r.status === 423) return showLock();
+      if (!r.ok || !j.ok) throw new Error(j.error || (r.status >= 500 ? `this computer didn't answer (HTTP ${r.status}); try again` : `HTTP ${r.status}`));
+      a.dataset.ok = "1"; a.click();
+    } catch (x) { err.textContent = `Can't download: ${x.message === "Failed to fetch" ? "no connection to this computer" : x.message}`; err.hidden = false; }
+    finally { delete a.dataset.busy; meta.textContent = `${fmtSize(e.size)} · ${ago(e.mtime)}`; }
+  } }, `📄 ${e.name}`);
+  return h("li", { class: "card file" }, a, meta, err);
+}
 async function showFiles(rel) {
   if (chat) { chat.close(); chat = null; }
   setHeader("Files", { back: true });
@@ -623,8 +647,7 @@ async function showFiles(rel) {
     ...(r.parent != null ? [h("li", { class: "card file", onclick: () => { location.hash = filesHash(r.parent); } }, h("span", { class: "fname" }, "‹ .."))] : []),
     ...r.entries.map((e) => e.dir
       ? h("li", { class: "card file", onclick: () => { location.hash = filesHash(join(e.name)); } }, h("span", { class: "fname" }, `📁 ${e.name}`), h("span", { class: "meta" }, ago(e.mtime)))
-      : h("li", { class: "card file" }, h("a", { class: "fname", href: `/api/files/download?path=${encodeURIComponent(join(e.name))}`, download: e.name, title: "Download" }, `📄 ${e.name}`),
-          h("span", { class: "meta" }, `${fmtSize(e.size)} · ${ago(e.mtime)}`))));
+      : fileItem(join(e.name), e)));
   if (!r.entries.length) list.append(h("li", { class: "muted center" }, "Empty folder."));
   const prog = h("div", { class: "uploads" });
   const input = h("input", { type: "file", multiple: true, hidden: true, onchange: async () => {

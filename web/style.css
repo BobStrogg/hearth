@@ -81,3 +81,4 @@ figcaption { margin-top:.2rem; font-size:.75rem; }
 .hid{display:flex;align-items:center;gap:4px}
 .toolbar { flex-wrap:wrap; }
 .toolbar button { white-space:nowrap; } .toolbar .row { flex-wrap:wrap; justify-content:flex-end; }
+.files .file{flex-wrap:wrap}.files .file>.err{flex-basis:100%;font-size:.9em}

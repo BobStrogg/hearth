@@ -102,6 +102,38 @@ test("files: list (hidden toggle), download headers, traversal and symlink escap
   assert.equal((await api("GET", "/api/files", undefined, "")).status, 401);
 });
 
+test("files: download answers errors before streaming, preflight check, ranges/resume, RFC 5987 names", async () => {
+  const big = randomBytes(200_000), name = "Model part (v2) it's.stl";
+  writeFileSync(join(home, "docs", name), big);
+  const dl = (q, extra) => api("GET", "/api/files/download?path=" + encodeURIComponent("docs/" + name) + (q || ""), undefined, undefined, extra);
+  let r = await dl("&check=1"); assert.equal(r.status, 200); assert.deepEqual(r.json, { ok: true, size: 200_000, name });
+  r = await dl(); assert.equal(r.status, 200); assert.equal(r.headers.get("accept-ranges"), "bytes"); assert.equal(r.headers.get("content-length"), "200000");
+  const cd = r.headers.get("content-disposition");
+  assert.ok(cd.includes(`filename*=UTF-8''Model%20part%20%28v2%29%20it%27s.stl`), cd); assert.ok(cd.includes(`filename="Model part (v2) it's.stl"`), cd);
+  const etag = r.headers.get("etag"); assert.ok(etag);
+  const bin = async (extra) => { const x = await fetch(base + "/api/files/download?path=" + encodeURIComponent("docs/" + name), { headers: hdrs(undefined, extra) }); return { status: x.status, headers: x.headers, buf: Buffer.from(await x.arrayBuffer()) }; };
+  let b = await bin({}); assert.ok(b.buf.equals(big), "full body intact");
+  b = await bin({ range: "bytes=150000-" }); assert.equal(b.status, 206); assert.equal(b.headers.get("content-range"), "bytes 150000-199999/200000"); assert.ok(b.buf.equals(big.subarray(150_000)), "resume from an offset");
+  b = await bin({ range: "bytes=10-19", "if-range": etag }); assert.equal(b.status, 206); assert.ok(b.buf.equals(big.subarray(10, 20)));
+  b = await bin({ range: "bytes=-5" }); assert.equal(b.status, 206); assert.ok(b.buf.equals(big.subarray(199_995)));
+  b = await bin({ range: "bytes=10-19", "if-range": '"stale"' }); assert.equal(b.status, 200, "changed file: whole thing again"); assert.equal(b.buf.length, 200_000);
+  b = await bin({ range: "bytes=999999-" }); assert.equal(b.status, 416); assert.equal(b.headers.get("content-range"), "bytes */200000");
+  const head = await fetch(base + "/api/files/download?path=" + encodeURIComponent("docs/" + name), { method: "HEAD", headers: hdrs() }); assert.equal(head.status, 200); assert.equal(head.headers.get("content-length"), "200000");
+  writeFileSync(join(home, "docs", "empty.txt"), "");
+  r = await api("GET", "/api/files/download?path=docs/empty.txt"); assert.equal(r.status, 200); assert.equal(r.text, "");
+  // A file that's listed but can't be read must get a real error (not a dropped connection, which proxies turn into a 502).
+  if (process.platform !== "win32" && process.getuid?.() !== 0) {
+    const { chmodSync } = await import("node:fs");
+    writeFileSync(join(home, "docs", "locked.stl"), "nope"); chmodSync(join(home, "docs", "locked.stl"), 0o000);
+    assert.ok((await api("GET", "/api/files?path=docs")).json.entries.some((e) => e.name === "locked.stl"));
+    r = await api("GET", "/api/files/download?path=docs/locked.stl"); assert.equal(r.status, 403); assert.match(r.json.error, /permission denied|macOS/);
+    r = await api("GET", "/api/files/download?path=docs/locked.stl&check=1"); assert.equal(r.status, 403);
+    chmodSync(join(home, "docs", "locked.stl"), 0o600);
+  }
+  r = await api("GET", "/api/files/download?path=docs&check=1"); assert.equal(r.status, 400);
+  r = await api("GET", "/api/files/download?path=docs/nope.txt&check=1"); assert.equal(r.status, 404);
+});
+
 test("files: chunked upload with resume, overwrite guard, mkdir, CSRF", async () => {
   const up = (q, body, extra) => api("POST", "/api/files/upload?" + new URLSearchParams(q), body, undefined, { "content-type": "application/octet-stream", ...extra });
   const data = randomBytes(300_000);

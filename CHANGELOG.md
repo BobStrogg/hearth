@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.1
+- Files: downloads that failed with "Site wasn't available" behind a proxy/tunnel now work or say why. The file is
+  opened and its first block read before any header is sent, so a file that's listed but can't be read (macOS privacy
+  controls, an iCloud placeholder, another user's file) gets a real error with a plain reason instead of a dropped
+  connection (which Cloudflare Tunnel reports to the browser as a 502). macOS `EPERM` explains how to grant access.
+- Files: clicking a file checks it first (`/api/files/download?check=1`) and shows any problem in the list, then
+  hands the download to the browser as before (streamed to disk).
+- Files: downloads support `Range`/`If-Range` (206, 416), `ETag`, `Last-Modified` and `HEAD`, so the browser's Resume
+  continues an interrupted download. `filename*` is fully RFC 5987-encoded. Read errors are logged.
+
 ## 0.5.0
 - Notifications: each device can opt in (🔔 on the session list) to Web Push notifications when an agent finishes a
   turn (with the end of its reply; errors and unusual stop reasons say so) or is waiting for approval. Nothing is sent

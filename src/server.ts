@@ -13,7 +13,7 @@ import { pidFile } from "./service.js";
 import { cmpVer, latestRelease, plan, type Release, spawnUpdater } from "./update.js";
 import { VERSION } from "./version.js";
 import { LiveSession, within } from "./session.js";
-import { Files, FilesError } from "./files.js";
+import { Files, FilesError, readError } from "./files.js";
 import { DEFAULT_PUSH_HOSTS, endpointOk, Push, replyTail, snippet, validSubscription } from "./push.js";
 const HISTORY_TURNS = 8;
 import { dedupeFanout, type SessionMeta, Store } from "./store.js";
@@ -354,7 +354,7 @@ export class Hearth {
     const path = url.searchParams.get("path") ?? "";
     try {
       if (url.pathname === "/api/files" && q.method === "GET") return this.send(s, 200, { ...f.list(path, url.searchParams.get("hidden") === "1"), root: f.root });
-      if (url.pathname === "/api/files/download" && q.method === "GET") return await f.download(path, s, SEC_HEADERS);
+      if (url.pathname === "/api/files/download" && (q.method === "GET" || q.method === "HEAD")) return await f.download(path, q, s, SEC_HEADERS, url.searchParams.get("check") === "1");
       if (url.pathname === "/api/files/mkdir" && q.method === "POST") { const b = await this.body(q); return this.send(s, 201, f.mkdir(String(b.path ?? ""), String(b.name ?? ""))); }
       if (url.pathname === "/api/files/upload" && q.method === "POST") {
         const n = (k: string) => Number(url.searchParams.get(k) ?? NaN);
@@ -363,10 +363,10 @@ export class Hearth {
       }
       return this.send(s, 404, { error: "not found" });
     } catch (e) {
-      if (s.headersSent) { s.destroy(); return; }
-      if (e instanceof FilesError) return this.send(s, e.status, { error: e.message, ...((e as unknown as { have?: number }).have !== undefined ? { have: (e as unknown as { have: number }).have } : {}) });
-      const code = (e as NodeJS.ErrnoException).code;
-      return this.send(s, code === "EACCES" || code === "EPERM" ? 403 : code === "ENOENT" ? 404 : 500, { error: code === "EACCES" || code === "EPERM" ? "permission denied" : String((e as Error).message) });
+      if (s.headersSent) { console.error(`files: ${url.pathname} ${JSON.stringify(path)} failed mid-response: ${(e as NodeJS.ErrnoException).code ?? (e as Error)?.message}`); s.destroy(); return; }
+      const fe = readError(e);
+      if (fe.status >= 500 || fe.log) console.error(`files: ${url.pathname} ${JSON.stringify(path)}: ${fe.message}`);
+      return this.send(s, fe.status, { error: fe.message, ...((e as unknown as { have?: number }).have !== undefined ? { have: (e as unknown as { have: number }).have } : {}) });
     }
   }
 
