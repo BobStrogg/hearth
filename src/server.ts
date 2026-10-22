@@ -28,6 +28,8 @@ export interface Config extends AuthConfig {
   /** Browser file manager (list/download/upload/new folder) confined to filesRoot. HEARTH_FILES=off disables it. */
   files: boolean;
   filesRoot: string;
+  /** Deadline for one file-system call in the file browser (HEARTH_FILES_TIMEOUT_MS, default 15 s). */
+  filesTimeoutMs: number;
   /** Web Push notifications (each device opts in from the UI). HEARTH_PUSH=off disables them. */
   push: boolean;
   pushSubject?: string;
@@ -46,6 +48,7 @@ export function configFromEnv(env = process.env): Config {
     autoUpdate: /^(on|1|true|yes)$/i.test(env.HEARTH_AUTO_UPDATE ?? ""),
     files: !/^(off|0|false|no)$/i.test(env.HEARTH_FILES ?? ""),
     filesRoot: resolve(env.HEARTH_FILES_ROOT || homedir()),
+    filesTimeoutMs: Math.max(1000, Number(env.HEARTH_FILES_TIMEOUT_MS) || 15000),
     push: !/^(off|0|false|no)$/i.test(env.HEARTH_PUSH ?? ""),
     pushSubject: env.HEARTH_PUSH_SUBJECT || undefined,
     pushHosts: [...DEFAULT_PUSH_HOSTS, ...list(env.HEARTH_PUSH_HOSTS).map((h) => h.toLowerCase())],
@@ -112,7 +115,7 @@ export class Hearth {
     this.store = new Store(cfg.dataDir);
     this.auth = new Auth(cfg);
     this.agents = loadAgents(cfg.agentsFile);
-    if (cfg.files) { try { this.files = new Files(cfg.filesRoot); } catch { this.files = null; } }
+    if (cfg.files) { try { this.files = new Files(cfg.filesRoot, { timeoutMs: cfg.filesTimeoutMs }); } catch { this.files = null; } }
     if (cfg.push) {
       // VAPID "sub" must be a mailto: or https: contact; default to this server's public origin.
       const subject = cfg.pushSubject || cfg.allowedOrigins.find((o) => o.startsWith("https://")) || "https://github.com/BobStrogg/hearth";
@@ -353,9 +356,9 @@ export class Hearth {
     if (!f) return this.send(s, 404, { error: "the file browser is turned off (HEARTH_FILES=off)" });
     const path = url.searchParams.get("path") ?? "";
     try {
-      if (url.pathname === "/api/files" && q.method === "GET") return this.send(s, 200, { ...f.list(path, url.searchParams.get("hidden") === "1"), root: f.root });
+      if (url.pathname === "/api/files" && q.method === "GET") return this.send(s, 200, { ...(await f.list(path, url.searchParams.get("hidden") === "1")), root: f.root });
       if (url.pathname === "/api/files/download" && (q.method === "GET" || q.method === "HEAD")) return await f.download(path, q, s, SEC_HEADERS, url.searchParams.get("check") === "1");
-      if (url.pathname === "/api/files/mkdir" && q.method === "POST") { const b = await this.body(q); return this.send(s, 201, f.mkdir(String(b.path ?? ""), String(b.name ?? ""))); }
+      if (url.pathname === "/api/files/mkdir" && q.method === "POST") { const b = await this.body(q); return this.send(s, 201, await f.mkdir(String(b.path ?? ""), String(b.name ?? ""))); }
       if (url.pathname === "/api/files/upload" && q.method === "POST") {
         const n = (k: string) => Number(url.searchParams.get(k) ?? NaN);
         const r = await f.upload(q, { rel: path, name: url.searchParams.get("name") ?? "", id: url.searchParams.get("id") ?? "", offset: n("offset"), total: n("total"), overwrite: url.searchParams.get("overwrite") === "1" });

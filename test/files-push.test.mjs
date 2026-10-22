@@ -8,7 +8,8 @@ import { after, before, test } from "node:test";
 import WebSocket from "ws";
 import { Hearth, configFromEnv } from "../dist/server.js";
 import { encrypt, endpointOk, Vapid, snippet, DEFAULT_PUSH_HOSTS } from "../dist/push.js";
-import { validName } from "../dist/files.js";
+import { validName, Files } from "../dist/files.js";
+import * as fsp from "node:fs/promises";
 
 const MOCK = new URL("./mock-agent.mjs", import.meta.url).pathname;
 const b64u = (b) => Buffer.from(b).toString("base64url");
@@ -132,6 +133,39 @@ test("files: download answers errors before streaming, preflight check, ranges/r
   }
   r = await api("GET", "/api/files/download?path=docs&check=1"); assert.equal(r.status, 400);
   r = await api("GET", "/api/files/download?path=docs/nope.txt&check=1"); assert.equal(r.status, 404);
+});
+
+test("files: a folder that blocks (macOS privacy prompt) times out with a reason; the rest of Hearth keeps answering", async () => {
+  mkdirSync(join(home, "Blocked"), { recursive: true }); writeFileSync(join(home, "Blocked", "x.stl"), "x");
+  const gates = [];
+  const blocked = (p) => /[\\/]Blocked([\\/]|$)/.test(p);
+  const hang = () => new Promise((res) => gates.push(res));
+  const stub = {
+    realpath: (p) => fsp.realpath(p), stat: (p) => fsp.stat(p), mkdir: (p) => fsp.mkdir(p), rename: (a, b) => fsp.rename(a, b), rm: (p) => fsp.rm(p, { force: true }),
+    readdir: (p) => blocked(p) ? hang().then(() => fsp.readdir(p, { withFileTypes: true })) : fsp.readdir(p, { withFileTypes: true }),
+    open: (p) => blocked(p) ? hang().then(() => fsp.open(p, "r")) : fsp.open(p, "r"),
+  };
+  const real = h.files; h.files = new Files(home, { fs: stub, timeoutMs: 300, maxStuck: 2 });
+  try {
+    const t0 = Date.now();
+    const slow = api("GET", "/api/files?path=Blocked");
+    // While that call is stuck, everything else still answers straight away.
+    const [hz, me, other] = await Promise.all([fetch(base + "/healthz"), api("GET", "/api/me"), api("GET", "/api/files?path=docs")]);
+    assert.equal(hz.status, 200); assert.equal(me.status, 200); assert.equal(other.status, 200);
+    assert.ok(Date.now() - t0 < 250, "other requests weren't held up");
+    let r = await slow; assert.equal(r.status, 504); assert.match(r.json.error, /privacy prompt/); assert.ok(Date.now() - t0 >= 280);
+    r = await api("GET", "/api/files/download?path=Blocked/x.stl&check=1"); assert.equal(r.status, 504);
+    assert.equal(h.files.stuck, 2);
+    const t1 = Date.now(); r = await api("GET", "/api/files?path=docs"); assert.equal(r.status, 503, "refused at once while calls are stuck"); assert.ok(Date.now() - t1 < 200);
+    assert.match(r.json.error, /still stuck/);
+    assert.equal((await fetch(base + "/healthz")).status, 200);
+    for (const g of gates.splice(0)) g(); // the prompt was answered
+    await new Promise((res) => setTimeout(res, 50));
+    assert.equal(h.files.stuck, 0, "late results are released (and late file handles closed)");
+    r = await api("GET", "/api/files?path=docs"); assert.equal(r.status, 200);
+    const p2 = api("GET", "/api/files?path=Blocked"); await new Promise((res) => setTimeout(res, 20)); for (const g of gates.splice(0)) g();
+    r = await p2; assert.equal(r.status, 200); assert.deepEqual(r.json.entries.map((e) => e.name), ["x.stl"]);
+  } finally { for (const g of gates.splice(0)) g(); h.files = real; }
 });
 
 test("files: chunked upload with resume, overwrite guard, mkdir, CSRF", async () => {

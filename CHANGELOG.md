@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.2
+- Files: the file browser no longer freezes Hearth. Listing, opening, uploading and new-folder calls were synchronous,
+  so a folder macOS protects (Desktop, Documents, Downloads, cloud or network folders) could block the whole server
+  (every page, sessions and health checks) while macOS waited for someone to answer a privacy prompt on the Mac's
+  screen, often after Node was upgraded, since macOS ties those permissions to the exact binary. All file-browser calls are now
+  asynchronous with a deadline (`HEARTH_FILES_TIMEOUT_MS`, default 15 s). A call past it answers 504 with what to do
+  (click Allow on the Mac, or give node Full Disk Access). While 3 calls are still stuck, new file requests are refused
+  at once, so the rest of Hearth keeps working. Entries are stat'ed a few at a time.
+- The libuv thread pool defaults to 16 threads (`UV_THREADPOOL_SIZE`, if not already set).
+- Files view shows "Loading…" while a folder opens, and a link back to the top of Files after an error.
+
 ## 0.5.1
 - Files: downloads that failed with "Site wasn't available" behind a proxy/tunnel now work or say why. The file is
   opened and its first block read before any header is sent, so a file that's listed but can't be read (macOS privacy

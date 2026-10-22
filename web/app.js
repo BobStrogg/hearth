@@ -636,6 +636,7 @@ function fileItem(path, e) {
 async function showFiles(rel) {
   if (chat) { chat.close(); chat = null; }
   setHeader("Files", { back: true });
+  $("#view").replaceChildren(h("p", { class: "muted center" }, "Loading…"));
   const me = await api("GET", "/api/me"); if (me.needsPassword && !me.unlocked) return showLock();
   const hidden = localStorage.getItem("hearth.hidden") === "1";
   const r = await api("GET", `/api/files?path=${encodeURIComponent(rel)}${hidden ? "&hidden=1" : ""}`);
@@ -760,7 +761,10 @@ async function route() {
       setHeader(s.title, { back: true, menu: true, status: s.state });
       chat = new Chat(s.id); chat.title = s.title;
     } else await showList();
-  } catch (e) { if (e.message !== "locked") $("#view").replaceChildren(h("p", { class: "err center" }, e.message)); }
+  } catch (e) {
+    if (e.message === "locked") return;
+    $("#view").replaceChildren(h("p", { class: "err center" }, e.message), ...(fm ? [h("p", { class: "center" }, h("a", { href: "#/files" }, "🏠 Files home"))] : []));
+  }
 }
 addEventListener("hashchange", route);
 route();

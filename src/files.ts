@@ -1,5 +1,6 @@
-import { createWriteStream, mkdirSync, readdirSync, realpathSync, renameSync, rmSync, statSync } from "node:fs";
-import { open, type FileHandle } from "node:fs/promises";
+import { createWriteStream, realpathSync, type Dirent, type Stats } from "node:fs";
+import * as fsp from "node:fs/promises";
+import type { FileHandle } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pipeline } from "node:stream/promises";
@@ -40,21 +41,69 @@ export function validName(n: string): boolean {
   return typeof n === "string" && n.length > 0 && n.length <= 255 && n !== "." && n !== ".." && !/[/\\\0]/.test(n) && !n.includes(".hearth-upload-");
 }
 
+/** File-system calls the file browser makes, all asynchronous (overridable in tests). */
+export interface FilesFs {
+  realpath(p: string): Promise<string>;
+  stat(p: string): Promise<Stats>;
+  readdir(p: string): Promise<Dirent[]>;
+  mkdir(p: string): Promise<unknown>;
+  rename(a: string, b: string): Promise<void>;
+  rm(p: string): Promise<void>;
+  open(p: string): Promise<FileHandle>;
+}
+const realFs: FilesFs = {
+  realpath: (p) => fsp.realpath(p), stat: (p) => fsp.stat(p), readdir: (p) => fsp.readdir(p, { withFileTypes: true }),
+  mkdir: (p) => fsp.mkdir(p), rename: (a, b) => fsp.rename(a, b), rm: (p) => fsp.rm(p, { force: true }), open: (p) => fsp.open(p, "r"),
+};
+
+export const SLOW_MSG = "this folder or file is taking too long to open. On a Mac this usually means macOS is showing a privacy prompt on the Mac's screen " +
+  "(\"node would like to access files in…\"): click Allow there, or give node Full Disk Access in System Settings > Privacy & Security. Cloud folders " +
+  "(iCloud Drive, Google Drive, Dropbox, network drives) can also be slow while they download.";
+
+/**
+ * The file browser. Every file-system call is asynchronous (runs on libuv's thread pool, never on the main thread) and
+ * has a deadline: on macOS a read in a protected folder (Desktop, Documents, Downloads, cloud and network folders) can
+ * block until someone answers a privacy prompt on the Mac's screen, and a synchronous call there froze the whole server
+ * (every page, the agents, health checks). A call past its deadline answers 504 with an explanation; calls still stuck
+ * are counted, and while several are stuck new file requests are refused at once, so the thread pool (also used for
+ * DNS, crypto and session storage) is never used up.
+ */
 export class Files {
-  readonly root: string;
-  constructor(root: string) { this.root = realpathSync(root); }
+  stuck = 0;
+  readonly root: string; readonly timeoutMs: number; readonly maxStuck: number;
+  private fs: FilesFs;
+  /** The root itself is resolved once at startup (the home folder isn't privacy-protected). */
+  constructor(root: string, o: { fs?: FilesFs; timeoutMs?: number; maxStuck?: number } = {}) {
+    this.root = realpathSync(root); this.fs = o.fs ?? realFs; this.timeoutMs = o.timeoutMs ?? 15000; this.maxStuck = o.maxStuck ?? 3;
+  }
+
+  /** Run one file-system call with the deadline and stuck accounting. */
+  private op<T>(p: () => Promise<T>): Promise<T> {
+    if (this.stuck >= this.maxStuck) return Promise.reject(new FilesError(503, `waiting on ${this.stuck} earlier file requests that are still stuck; ${SLOW_MSG}`));
+    const run = p();
+    return new Promise<T>((res, rej) => {
+      let late = false;
+      const t = setTimeout(() => { late = true; this.stuck++; const fe = new FilesError(504, SLOW_MSG); fe.log = true; rej(fe); }, this.timeoutMs);
+      run.then((v) => { clearTimeout(t); if (late) { this.stuck--; if (v && typeof (v as { close?: unknown }).close === "function") void (v as unknown as FileHandle).close().catch(() => {}); } else res(v); },
+        (e) => { clearTimeout(t); if (late) this.stuck--; else rej(e); });
+    });
+  }
+  private stat(p: string) { return this.op(() => this.fs.stat(p)); }
+  private statOrNull(p: string) { return this.stat(p).catch((e) => { if ((e as NodeJS.ErrnoException).code === "ENOENT") return null; throw e; }); }
 
   /** Resolve a root-relative path; throws 403 if it (or what it links to) leaves the root. `mustExist` false allows a new leaf. */
-  resolve(rel: string, mustExist = true): string {
+  async resolve(rel: string, mustExist = true): Promise<string> {
     const r = String(rel ?? "");
     if (r.length > 4096 || r.includes("\0")) throw new FilesError(400, "bad path");
     const abs = resolve(this.root, "." + sep + r.replace(/^[/\\]+/, ""));
     if (!this.inside(abs)) throw new FilesError(403, "outside the files folder");
     let real: string;
-    try { real = realpathSync(abs); }
-    catch {
-      if (mustExist) throw new FilesError(404, "not found");
-      let parent: string; try { parent = realpathSync(resolve(abs, "..")); } catch { throw new FilesError(404, "folder not found"); }
+    try { real = await this.op(() => this.fs.realpath(abs)); }
+    catch (e) {
+      if (e instanceof FilesError) throw e;
+      if (mustExist) throw readError(e).status === 403 ? readError(e) : new FilesError(404, "not found");
+      let parent: string;
+      try { parent = await this.op(() => this.fs.realpath(resolve(abs, ".."))); } catch (e2) { if (e2 instanceof FilesError) throw e2; throw new FilesError(404, "folder not found"); }
       if (!this.inside(parent)) throw new FilesError(403, "outside the files folder");
       return join(parent, basename(abs));
     }
@@ -64,17 +113,29 @@ export class Files {
   private inside(p: string) { const rel = relative(this.root, p); return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel)); }
   rel(abs: string) { return relative(this.root, abs).split(sep).join("/"); }
 
-  list(rel: string, hidden = false) {
-    const dir = this.resolve(rel);
-    if (!statSync(dir).isDirectory()) throw new FilesError(400, "not a folder");
-    const entries = [];
-    for (const d of readdirSync(dir, { withFileTypes: true })) {
-      if (!hidden && d.name.startsWith(".")) continue;
-      if (d.name.includes(".hearth-upload-")) continue;
-      let st; try { st = statSync(join(dir, d.name)); } catch { continue; } // broken symlink
-      if (d.isSymbolicLink()) { try { if (!this.inside(realpathSync(join(dir, d.name)))) continue; } catch { continue; } } // links out of the root aren't shown
-      entries.push({ name: d.name, dir: st.isDirectory(), size: st.isFile() ? st.size : null, mtime: st.mtime.toISOString(), link: d.isSymbolicLink() || undefined });
-    }
+  async list(rel: string, hidden = false) {
+    const dir = await this.resolve(rel);
+    let ents: Dirent[];
+    try {
+      if (!(await this.stat(dir)).isDirectory()) throw new FilesError(400, "not a folder");
+      ents = await this.op(() => this.fs.readdir(dir));
+    } catch (e) { throw readError(e); }
+    ents = ents.filter((d) => (hidden || !d.name.startsWith(".")) && !d.name.includes(".hearth-upload-"));
+    type Entry = { name: string; dir: boolean; size: number | null; mtime: string; link?: boolean };
+    const out: (Entry | null)[] = new Array(ents.length).fill(null);
+    // Stat entries a few at a time (each still has the deadline); one entry that can't be read is just left out.
+    let next = 0;
+    const worker = async () => {
+      for (let i = next++; i < ents.length; i = next++) {
+        const d = ents[i], p = join(dir, d.name);
+        let st: Stats;
+        try { st = await this.stat(p); } catch (e) { if (e instanceof FilesError && e.status >= 503) throw e; continue; } // broken symlink etc.
+        if (d.isSymbolicLink()) { try { if (!this.inside(await this.op(() => this.fs.realpath(p)))) continue; } catch (e) { if (e instanceof FilesError && e.status >= 503) throw e; continue; } } // links out of the root aren't shown
+        out[i] = { name: d.name, dir: st.isDirectory(), size: st.isFile() ? st.size : null, mtime: st.mtime.toISOString(), link: d.isSymbolicLink() || undefined };
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(4, ents.length) }, worker));
+    const entries = out.filter((x): x is Entry => !!x);
     entries.sort((a, b) => (a.dir === b.dir ? a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }) : a.dir ? -1 : 1));
     const r = this.rel(dir);
     return { path: r, parent: r === "" ? null : this.rel(resolve(dir, "..")), entries };
@@ -88,14 +149,15 @@ export class Files {
    * browsers can resume an interrupted download, and `?check=1`-style preflights via `checkOnly`.
    */
   async download(rel: string, q: IncomingMessage, s: ServerResponse, headers: Record<string, string>, checkOnly = false) {
-    const f = this.resolve(rel);
-    const st0 = statSync(f);
-    if (!st0.isFile()) throw new FilesError(400, "not a file");
+    const f = await this.resolve(rel);
     let fh: FileHandle;
-    try { fh = await open(f, "r"); } catch (e) { throw readError(e); }
+    try {
+      if (!(await this.stat(f)).isFile()) throw new FilesError(400, "not a file");
+      fh = await this.op(() => this.fs.open(f));
+    } catch (e) { throw readError(e); }
     let handedOff = false;
     try {
-      const st = await fh.stat(), size = st.size;
+      const st = await this.op(() => fh.stat()), size = st.size;
       const etag = `"${size.toString(36)}-${Math.floor(st.mtimeMs).toString(36)}"`, lastMod = st.mtime.toUTCString();
       let start = 0, end = size - 1, partial = false;
       const range = q.headers.range, ifRange = q.headers["if-range"];
@@ -113,7 +175,7 @@ export class Files {
       const len = size === 0 ? 0 : end - start + 1;
       const first = Buffer.alloc(Math.min(len, 64 * 1024));
       let got = 0;
-      try { while (got < first.length) { const { bytesRead } = await fh.read(first, got, first.length - got, start + got); if (!bytesRead) break; got += bytesRead; } }
+      try { while (got < first.length) { const { bytesRead } = await this.op(() => fh.read(first, got, first.length - got, start + got)); if (!bytesRead) break; got += bytesRead; } }
       catch (e) { throw readError(e); }
       if (got < first.length) throw new FilesError(409, "the file changed while it was being read; try again");
       if (checkOnly) { s.writeHead(200, { ...headers, "content-type": "application/json", "cache-control": "no-store" }); s.end(JSON.stringify({ ok: true, size, name: basename(f) })); return; }
@@ -126,16 +188,18 @@ export class Files {
       s.write(first);
       if (got >= len) { s.end(); return; }
       handedOff = true;
+      // If the browser goes away mid-download, pipeline destroys the read stream, which closes the file.
       await pipeline(fh.createReadStream({ start: start + got, end, autoClose: true }), s);
     } finally { if (!handedOff) await fh.close().catch(() => {}); }
   }
 
-  mkdir(rel: string, name: string) {
+  async mkdir(rel: string, name: string) {
     if (!validName(name)) throw new FilesError(400, "bad folder name");
-    const parent = this.resolve(rel);
-    if (!statSync(parent).isDirectory()) throw new FilesError(400, "not a folder");
-    const target = this.resolve(this.rel(join(parent, name)), false);
-    try { mkdirSync(target); } catch (e) { throw new FilesError((e as NodeJS.ErrnoException).code === "EEXIST" ? 409 : 500, (e as NodeJS.ErrnoException).code === "EEXIST" ? "already exists" : String((e as Error).message)); }
+    const parent = await this.resolve(rel);
+    if (!(await this.stat(parent)).isDirectory()) throw new FilesError(400, "not a folder");
+    const target = await this.resolve(this.rel(join(parent, name)), false);
+    try { await this.op(() => this.fs.mkdir(target)); }
+    catch (e) { if (e instanceof FilesError) throw e; const c = (e as NodeJS.ErrnoException).code; throw c === "EEXIST" ? new FilesError(409, "already exists") : readError(e); }
     return { path: this.rel(target) };
   }
 
@@ -145,26 +209,30 @@ export class Files {
    * The last chunk renames the temp file into place (refusing to replace an existing file unless `overwrite`).
    */
   async upload(q: IncomingMessage, o: { rel: string; name: string; id: string; offset: number; total: number; overwrite: boolean }) {
-    if (!validName(o.name)) throw new FilesError(400, "bad file name");
-    if (!/^[a-z0-9]{8,40}$/.test(o.id)) throw new FilesError(400, "bad upload id");
-    if (!Number.isSafeInteger(o.total) || o.total < 0 || !Number.isSafeInteger(o.offset) || o.offset < 0 || o.offset > o.total) throw new FilesError(400, "bad offset/total");
-    const dir = this.resolve(o.rel);
-    if (!statSync(dir).isDirectory()) throw new FilesError(400, "not a folder");
-    const target = this.resolve(this.rel(join(dir, o.name)), false);
-    const exists = statSync(target, { throwIfNoEntry: false });
-    if (exists?.isDirectory()) throw new FilesError(409, "a folder with that name exists");
-    if (exists && !o.overwrite) throw new FilesError(409, "exists");
-    const tmp = join(dir, `.${o.name.slice(0, 180)}.hearth-upload-${o.id}`);
-    const have = statSync(tmp, { throwIfNoEntry: false })?.size ?? 0;
-    if (have !== o.offset) { q.resume(); throw Object.assign(new FilesError(409, "offset mismatch"), { have }); }
+    const drain = (e: unknown) => { q.resume(); throw e; };
+    if (!validName(o.name)) drain(new FilesError(400, "bad file name"));
+    if (!/^[a-z0-9]{8,40}$/.test(o.id)) drain(new FilesError(400, "bad upload id"));
+    if (!Number.isSafeInteger(o.total) || o.total < 0 || !Number.isSafeInteger(o.offset) || o.offset < 0 || o.offset > o.total) drain(new FilesError(400, "bad offset/total"));
+    let dir: string, target: string, tmp: string;
+    try {
+      dir = await this.resolve(o.rel);
+      if (!(await this.stat(dir)).isDirectory()) throw new FilesError(400, "not a folder");
+      target = await this.resolve(this.rel(join(dir, o.name)), false);
+      const exists = await this.statOrNull(target);
+      if (exists?.isDirectory()) throw new FilesError(409, "a folder with that name exists");
+      if (exists && !o.overwrite) throw new FilesError(409, "exists");
+      tmp = join(dir, `.${o.name.slice(0, 180)}.hearth-upload-${o.id}`);
+      const have = (await this.statOrNull(tmp))?.size ?? 0;
+      if (have !== o.offset) throw Object.assign(new FilesError(409, "offset mismatch"), { have });
+    } catch (e) { return drain(e instanceof FilesError ? e : readError(e)); }
     const room = Math.min(MAX_CHUNK, o.total - o.offset); let n = 0;
     const limit = new Transform({ transform(c: Buffer, _e, cb) { n += c.length; if (n > room) cb(new FilesError(413, "chunk too large")); else cb(null, c); } });
     try { await pipeline(q, limit, createWriteStream(tmp, { flags: o.offset === 0 ? "w" : "a" })); }
-    catch (e) { if (o.offset === 0) rmSync(tmp, { force: true }); throw e instanceof FilesError ? e : new FilesError(400, "upload interrupted"); }
+    catch (e) { if (o.offset === 0) await this.op(() => this.fs.rm(tmp)).catch(() => {}); throw e instanceof FilesError ? e : new FilesError(400, "upload interrupted"); }
     const size = o.offset + n;
     if (size < o.total) return { received: size, done: false };
-    if (statSync(target, { throwIfNoEntry: false }) && !o.overwrite) { rmSync(tmp, { force: true }); throw new FilesError(409, "exists"); }
-    renameSync(tmp, target);
+    if ((await this.statOrNull(target)) && !o.overwrite) { await this.op(() => this.fs.rm(tmp)).catch(() => {}); throw new FilesError(409, "exists"); }
+    await this.op(() => this.fs.rename(tmp, target));
     return { received: size, done: true, path: this.rel(target) };
   }
 }

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import "./threadpool.js";
 import { hashPassword } from "./auth.js";
 import { deepProbe, loadAgents, probe } from "./agents.js";
 import { doctor, printChecks } from "./doctor.js";
