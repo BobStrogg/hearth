@@ -754,7 +754,7 @@ async function notifySheet() {
 const KB = (() => {
   const KF = "hearth.kbFrac", TESLA = /Tesla/.test(navigator.userAgent);
   let frac = Math.min(0.8, Math.max(0.3, +localStorage.getItem(KF) || 0.52));
-  let manual = false, auto = false, veto = false, tmr = 0, raf = 0, lastField = null;
+  let manual = false, auto = false, veto = false, tmr = 0, raf = 0, lastField = null, lastSize = "";
   const on = () => manual || (auto && !veto);
   const isField = (el) => !!el && (el.tagName === "TEXTAREA" || el.isContentEditable ||
     (el.tagName === "INPUT" && !/^(checkbox|radio|button|submit|reset|file|range|color|image|hidden)$/i.test(el.type)));
@@ -768,8 +768,9 @@ const KB = (() => {
     b.classList.add("vp"); b.classList.toggle("kbm", k);
     b.classList.toggle("kb", k || (!!v && window.innerHeight - v.height > 120));
     const t = $("#kbm"); t.classList.toggle("on", k); t.setAttribute("aria-pressed", String(k));
+    const sz = `${Math.round(hgt)}:${Math.round(top)}`; if (sz === lastSize) return; lastSize = sz; // only when the size really changed
     cancelAnimationFrame(raf); raf = requestAnimationFrame(() => { // keep the latest message and the field you're typing in visible
-      if (chat && (chat.stick || chat.atEnd)) chat.toEnd();
+      if (chat && chat.atEnd) chat.toEnd(); // only if you were following the end (scrolled-back reading stays put)
       const a = document.activeElement; if (isField(a)) a.scrollIntoView({ block: "nearest" });
     });
   }

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.5
+- Keyboard mode: a viewport resize only jumps to the latest message if you were already following the end (reading older
+  history stays put), and only when the size actually changed. Found by the macOS CI history-paging test on 0.5.4.
+
 ## 0.5.4
 - Same as 0.5.3, which was tagged but never published (a timing-sensitive browser test failed on one CI runner; the test now
   waits for the history replay more tolerantly and reports what the page showed if it fails).
