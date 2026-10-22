@@ -93,7 +93,8 @@ function versionBar() {
   const bar = h("div", { class: "verbar muted small" });
   const show = (v) => {
     const kids = [`Hearth ${v.version}`];
-    if (v.updating) kids.push(" · updating…");
+    if (v.managed) kids.push(" · ", h("a", { href: v.managed, target: "_blank", rel: "noopener" }, "updates are managed here ↗"));
+    else if (v.updating) kids.push(" · updating…");
     else if (v.updateAvailable) {
       kids.push(" · ", h("strong", {}, `${v.latest} available`));
       if (v.canApply) kids.push(" ", h("button", { class: "pillbtn", onclick: async (e) => {

@@ -3,9 +3,13 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+# Least privilege: read-only by default; each job asks for what it needs.
 permissions:
-  contents: write
-  id-token: write
+  contents: read
+env:
+  # Security floor for the Node.js that builds the package and is embedded in the single-file binaries
+  # (CVE-2026-111497 Brotli decoder RCE and others, October 2026). Bump after each Node.js security release.
+  NODE_FLOOR: 22.23.4
 jobs:
   build:
     strategy:
@@ -19,35 +23,52 @@ jobs:
           - { os: windows-latest, target: win-x64 }
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.os == 'windows-latest' }}
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version: ${{ env.NODE_FLOOR }}
+      - name: Refuse to build on a Node below the security floor
+        shell: bash
+        run: node scripts/check-node-floor.mjs "$NODE_FLOOR"
       - run: npm ci
       - run: npm test
         if: runner.os != 'Windows'
       - run: npm run build:sea
-      - uses: actions/upload-artifact@v4
+      - name: Check the Node embedded in the binary
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          EXE=$(ls build/hearth-* | head -1)
+          OUT=$("$EXE" doctor --offline 2>&1 || true)
+          echo "$OUT" | grep 'Node.js'
+          echo "$OUT" | grep -q "Node.js $(node -p process.versions.node)" || { echo "binary doesn't report the build Node"; exit 1; }
+          echo "embedded Node: $(node -p process.versions.node)"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: bin-${{ matrix.target }}
           path: build/hearth-*
           if-no-files-found: error
-  publish:
+  npm:
+    # Builds the npm tarball, writes SHA256SUMS over every release file, publishes to npm (trusted publishing via OIDC).
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version: ${{ env.NODE_FLOOR }}
           registry-url: https://registry.npmjs.org
+      - run: node scripts/check-node-floor.mjs "$NODE_FLOOR"
       - run: npm ci
       - name: Build npm package
-        run: |
-          npm pack
-          test -f "hearth-acp-${GITHUB_REF_NAME#v}.tgz"
-      - uses: actions/download-artifact@v4
+        run: npm pack
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: artifacts
       - name: Collect binaries and checksums
@@ -58,24 +79,62 @@ jobs:
           cp "hearth-acp-${VERSION}.tgz" dist-rel/
           (cd dist-rel && sha256sum * > SHA256SUMS)
           cat dist-rel/SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-files
+          path: dist-rel/*
+          if-no-files-found: error
       - name: Upgrade npm (trusted publishing needs >= 11.5.1)
         run: |
-          npm install -g npm@latest
+          npm install -g npm@11   # major pinned: this job holds the npm publish (OIDC) token
           npm --version
       - name: Publish to npm (trusted publishing via OIDC)
-        continue-on-error: true
         run: |
           VERSION=${GITHUB_REF_NAME#v}
           if npm view "hearth-acp@${VERSION}" version >/dev/null 2>&1; then
             echo "hearth-acp@${VERSION} already on npm: skipping publish"; exit 0
           fi
-          npm publish "./hearth-acp-${VERSION}.tgz" --provenance --access public
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+          npm publish "./dist-rel/hearth-acp-${VERSION}.tgz" --provenance --access public
+  release:
+    # GitHub release: created as a draft with every file (SHA256SUMS included) attached, checked, then published.
+    # With immutable releases on, files can only be added while it's a draft, so publishing is the last step.
+    needs: npm
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
+          name: release-files
+          path: dist-rel
+      - name: Create draft release with all files
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          draft: true
           generate_release_notes: true
           files: |
             dist-rel/*
+      - name: Check the draft's files, then publish it
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          TAG=$GITHUB_REF_NAME
+          want=$(cd dist-rel && ls | sort)
+          have=$(gh release view "$TAG" --json assets -q '.assets[].name' | sort)
+          [ "$want" = "$have" ] || { echo "draft assets differ:"; diff <(echo "$want") <(echo "$have"); exit 1; }
+          gh release edit "$TAG" --draft=false --latest
+          gh release view "$TAG" --json isDraft,isImmutable,url -q '"published: \(.url) draft=\(.isDraft) immutable=\(.isImmutable)"' || gh release view "$TAG" --json isDraft,url
+  tap:
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-files
+          path: dist-rel
       - name: Bump Homebrew tap
         continue-on-error: true
         env:
@@ -84,11 +143,11 @@ jobs:
           if [ -z "${HOMEBREW_TAP_TOKEN:-}" ]; then echo "HOMEBREW_TAP_TOKEN not set: skipping tap bump"; exit 0; fi
           VERSION=${GITHUB_REF_NAME#v}
           SHA=$(awk '/hearth-acp-'"${VERSION}"'\.tgz/{print $1}' dist-rel/SHA256SUMS)
-          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/BobStrogg/homebrew-hearth.git" tap
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${GITHUB_REPOSITORY_OWNER}/homebrew-hearth.git" tap
           cat > tap/Formula/hearth.rb <<RB
           class Hearth < Formula
             desc "Web UI for ACP coding agents"
-            homepage "https://github.com/BobStrogg/hearth"
+            homepage "https://github.com/${GITHUB_REPOSITORY}"
             url "https://registry.npmjs.org/hearth-acp/-/hearth-acp-${VERSION}.tgz"
             sha256 "${SHA}"
             license "MIT"

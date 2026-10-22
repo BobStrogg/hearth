@@ -36,7 +36,7 @@ Status: early. MIT licensed.
 
 ## Quick start
 
-Requires Node.js 20+. Pick one:
+Requires Node.js 22+ (use a patched release: 22.23.4, 24.22.1, 26.12.1 or newer). Pick one:
 
 ```bash
 # npm (global)
@@ -95,6 +95,7 @@ An existing `~/.hearth` is kept on every OS. Override with `HEARTH_HOME` / `HEAR
 | `HEARTH_CF_TEAM_DOMAIN`, `HEARTH_CF_AUD` | | Required for `cloudflare` identity |
 | `HEARTH_ALLOWED_USERS` | | Optional comma-separated allow-list of identities |
 | `HEARTH_USER_ALIASES` | | Optional `alias=canonical` pairs (comma-separated) so one person signing in with different identities (e.g. a GitHub or Google login next to an email one-time PIN) gets the same sessions. One hop, case-insensitive. Set it with `hearth service install --user-aliases …` |
+| `HEARTH_UPDATES_URL` | | Optional http(s) link for installs whose updates are managed elsewhere (a fleet dashboard, MDM…). Hearth then never checks for or applies updates itself (`HEARTH_AUTO_UPDATE` is ignored, `POST /api/update` is refused) and the version bar links there instead of offering *Update now*. Set with `hearth service install --updates-url …`. |
 | `HEARTH_PASSWORD` | `os` on macOS, else `off` | `off`, `os` (account password: `dscl` on macOS, `pamtester` on Linux), or `scrypt:…` from `hearth hash-password` |
 | `HEARTH_UNLOCK_TTL_HOURS` | `12` | How long an unlock lasts |
 | `HEARTH_ROOTS` | `$HOME` | Comma-separated folders that sessions and the folder picker may use |

@@ -50,7 +50,7 @@ export function loadEnvFile(env = process.env): string | null {
   return f;
 }
 
-export interface ConfigInput { port?: string; publicOrigin?: string; identity?: string; cfTeamDomain?: string; cfAud?: string; password?: string; roots?: string; autoUpdate?: string; userAliases?: string }
+export interface ConfigInput { port?: string; publicOrigin?: string; identity?: string; cfTeamDomain?: string; cfAud?: string; password?: string; roots?: string; autoUpdate?: string; userAliases?: string; updatesUrl?: string }
 
 /** Create the env file with defaults (if missing), then apply any explicitly given values. Mode 600. */
 export function writeEnvFile(file: string, given: ConfigInput, defaults: ConfigInput = {}, platform = process.platform, home = homedir()): { created: boolean; changed: string[] } {
@@ -70,6 +70,7 @@ export function writeEnvFile(file: string, given: ConfigInput, defaults: ConfigI
     cur.HEARTH_ROOTS = pick("roots") ?? home;
     cur.HEARTH_AUTO_UPDATE = pick("autoUpdate") ?? "off";
     const ua = pick("userAliases"); if (ua) cur.HEARTH_USER_ALIASES = ua;
+    const uu = pick("updatesUrl"); if (uu) cur.HEARTH_UPDATES_URL = uu;
   } else {
     set("HEARTH_PORT", given.port);
     if (given.publicOrigin) {
@@ -78,7 +79,7 @@ export function writeEnvFile(file: string, given: ConfigInput, defaults: ConfigI
     }
     set("HEARTH_IDENTITY", given.identity); set("HEARTH_CF_TEAM_DOMAIN", given.cfTeamDomain); set("HEARTH_CF_AUD", given.cfAud);
     set("HEARTH_PASSWORD", given.password); set("HEARTH_ROOTS", given.roots); set("HEARTH_AUTO_UPDATE", given.autoUpdate);
-    set("HEARTH_USER_ALIASES", given.userAliases);
+    set("HEARTH_USER_ALIASES", given.userAliases); set("HEARTH_UPDATES_URL", given.updatesUrl);
   }
   if (exists && !changed.length) return { created: false, changed };
   mkdirSync(join(file, ".."), { recursive: true, mode: 0o700 });

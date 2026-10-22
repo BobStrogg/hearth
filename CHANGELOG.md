@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.5.8
+- Security: the single-file binaries attached to each release embed the Node.js that builds them, and 0.5.2 to 0.5.7
+  were built on Node.js 22.23.2/22.23.3, before the October 2026 Node.js security release (CVE-2026-111497 Brotli decoder
+  RCE and others). 0.5.8's binaries embed Node.js 22.23.4. If you use a downloaded binary, update it. The npm package
+  runs on your own Node.js, so update that instead (see below).
+- Node.js 22 or newer is required (`engines`, the installer). Node.js 20 is end of life and gets no security fixes.
+- `hearth doctor` and `hearth serve` (at startup, in the log) warn when Node.js is older than the patched releases
+  22.23.4, 24.22.1 or 26.12.1, or is a line that no longer gets fixes.
+- Release pipeline hardening: Node.js pinned to the patched release and the build refuses to run below it; every
+  GitHub Action pinned to a full commit SHA; read-only token by default, with `id-token: write` (npm trusted
+  publishing) only on the npm job and `contents: write` only on the release job; npm pinned to 11.x instead of
+  `latest`; Dependabot for Actions and npm.
+- The GitHub release is created as a draft with every file (binaries, npm tarball, SHA256SUMS) attached and checked, and
+  only then published, so it works with GitHub immutable releases (files can't change after publishing). The npm
+  tarball and the release's tarball are the same file, so the checksums match.
+- `HEARTH_UPDATES_URL` (`hearth service install --updates-url https://…`): for installs whose updates are managed
+  elsewhere (a fleet dashboard, MDM). Hearth then never checks GitHub or updates itself (`HEARTH_AUTO_UPDATE` is
+  ignored, `POST /api/update` is refused) and the version bar links there instead of offering *Update now*. The page's
+  "update available" check is now at most 10 minutes old (was an hour).
+- Version history note: there is no 0.5.3 release. Its tag was pushed but the release run failed and nothing was
+  published; 0.5.4 replaced it. The tag is left in place (tags aren't rewritten).
+
 ## 0.5.7
 - Sending into a stopped session never looks ignored. While the agent is respawned and its session reloaded (which can
   take a while with a long conversation), the chat shows "Starting the agent…" and the status reads "starting", on every

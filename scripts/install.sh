@@ -19,15 +19,20 @@ DIR="${HEARTH_HOME:-$HOME/.hearth}"; APP="$DIR/app"
 OS="$(uname -s)"
 export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
 
-need_node() { command -v node >/dev/null 2>&1 && [ "$(node -p 'process.versions.node.split(".")[0]')" -ge 20 ]; }
+need_node() { command -v node >/dev/null 2>&1 && [ "$(node -p 'process.versions.node.split(".")[0]')" -ge 22 ]; }
 if ! need_node; then
   if [ "$OS" = Darwin ] && command -v brew >/dev/null; then echo "Installing Node via Homebrew…"; brew install node
   elif command -v apt-get >/dev/null 2>&1; then echo "Installing Node via apt…"; sudo apt-get update -qq && sudo apt-get install -y -qq nodejs npm
   elif command -v dnf >/dev/null 2>&1; then echo "Installing Node via dnf…"; sudo dnf install -y nodejs npm
   elif command -v pacman >/dev/null 2>&1; then echo "Installing Node via pacman…"; sudo pacman -S --noconfirm nodejs npm
-  else echo "Hearth needs Node.js 20+. Install it (https://nodejs.org), then re-run." >&2; exit 1; fi
-  need_node || { echo "Node.js 20+ still missing after install." >&2; exit 1; }
+  else echo "Hearth needs Node.js 22+ (22.23.4, 24.22.1, 26.12.1 or newer). Install it (https://nodejs.org), then re-run." >&2; exit 1; fi
+  need_node || { echo "Node.js 22+ still missing after install (your package manager may ship an older one: see https://nodejs.org)." >&2; exit 1; }
 fi
+# Patched releases per line (October 2026 Node.js security release). Older ones still work, but update soon.
+node -e 'const f={22:"22.23.4",24:"24.22.1",26:"26.12.1"},v=process.versions.node,m=+v.split(".")[0],p=s=>s.split(".").map(Number);
+  const lt=(a,b)=>{a=p(a);b=p(b);for(let i=0;i<3;i++)if(a[i]!==b[i])return a[i]<b[i];return false};
+  const w=f[m]?(lt(v,f[m])&&"has known security vulnerabilities; update to "+f[m]+" or newer"):(m<26&&"is a line that no longer gets security fixes; use 22, 24 or 26");
+  if(w)console.error("WARNING: Node.js "+v+" "+w+".")' || true
 
 mkdir -p "$DIR" && chmod 700 "$DIR"
 echo "Installing $SRC …"

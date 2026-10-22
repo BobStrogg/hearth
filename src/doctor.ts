@@ -2,6 +2,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { createServer } from "node:net";
 import { loadAgents, probe, which } from "./agents.js";
 import { installInfo } from "./install-info.js";
+import { nodeFloorCheck } from "./node-floor.js";
 import { dataDir, envFilePath, parseEnv } from "./platform.js";
 import { configFromEnv } from "./server.js";
 import { serviceManager } from "./service.js";
@@ -18,8 +19,8 @@ const portFree = (port: number, host: string) => new Promise<boolean>((res) => {
 /** Diagnose the install, config, agents, service and (optionally, with network) updates and Cloudflare Access. */
 export async function doctor(opts: { online?: boolean } = {}): Promise<Check[]> {
   const out: Check[] = []; const add = (level: Level, title: string, fix?: string) => out.push({ level, title, fix });
-  const major = Number(process.versions.node.split(".")[0]);
-  add(major >= 20 ? "ok" : "fail", `Node.js ${process.versions.node}`, major >= 20 ? undefined : "Install Node.js 20 or newer (https://nodejs.org, or `brew install node`).");
+  const nf = nodeFloorCheck();
+  add(nf.level, `Node.js ${process.versions.node}${nf.level === "ok" ? "" : nf.level === "fail" ? " (unsupported)" : " (needs a security update)"}`, nf.message && `${nf.message} Get it from https://nodejs.org or \`brew upgrade node\`.`);
   const info = installInfo();
   add("info", `Hearth ${VERSION} (${info.method}${info.prefix ? ` in ${info.prefix}` : info.exe ? `: ${info.exe}` : ""}) on ${process.platform}-${process.arch}`);
 

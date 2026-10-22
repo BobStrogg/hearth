@@ -8,6 +8,7 @@ import { configFromEnv, Hearth } from "./server.js";
 import { serviceManager, tail } from "./service.js";
 import { update } from "./update.js";
 import { VERSION } from "./version.js";
+import { nodeFloorCheck } from "./node-floor.js";
 
 const USAGE = `hearth ${VERSION}: web UI for ACP coding agents
 
@@ -16,7 +17,7 @@ const USAGE = `hearth ${VERSION}: web UI for ACP coding agents
         --system                 system-wide (LaunchDaemon / system unit; needs sudo), runs as you at boot
         --port N  --public-origin https://host  --identity single:|header:<h>|cloudflare
         --cf-team-domain https://<team>.cloudflareaccess.com  --cf-aud <aud>  --password off|os|scrypt:…
-        --roots dir1,dir2  --auto-update on|off  --user-aliases a@x=b@y,…   (written to the config file)
+        --roots dir1,dir2  --auto-update on|off  --user-aliases a@x=b@y,…  --updates-url https://…   (written to the config file)
   hearth service uninstall|start|stop|restart|status|logs
   hearth doctor [--offline]      check the install, config, agents, port and service
   hearth update [--check] [--force]   update from GitHub Releases, restart the service, roll back if unhealthy
@@ -69,9 +70,9 @@ async function main() {
     if (!svc) { console.error(process.platform === "linux" ? "systemd --user isn't available here. Use `sudo hearth service install --system`, or run `hearth` under your own supervisor (see README)." : "No supported service manager on this OS. Run `hearth` directly."); process.exit(1); }
     if (sub === "install") {
       const given: ConfigInput = { port: str(f.port), publicOrigin: str(f["public-origin"]), identity: str(f.identity), cfTeamDomain: str(f["cf-team-domain"]), cfAud: str(f["cf-aud"]),
-        password: str(f.password), roots: str(f.roots), autoUpdate: str(f["auto-update"]), userAliases: str(f["user-aliases"]) };
+        password: str(f.password), roots: str(f.roots), autoUpdate: str(f["auto-update"]), userAliases: str(f["user-aliases"]), updatesUrl: str(f["updates-url"]) };
       const e = process.env; // first-time defaults may also come from the environment (used by the install script)
-      const defaults: ConfigInput = { port: e.HEARTH_PORT, publicOrigin: e.HEARTH_PUBLIC_ORIGIN, identity: e.HEARTH_IDENTITY, cfTeamDomain: e.HEARTH_CF_TEAM_DOMAIN, cfAud: e.HEARTH_CF_AUD, password: e.HEARTH_PASSWORD, roots: e.HEARTH_ROOTS, autoUpdate: e.HEARTH_AUTO_UPDATE, userAliases: e.HEARTH_USER_ALIASES };
+      const defaults: ConfigInput = { port: e.HEARTH_PORT, publicOrigin: e.HEARTH_PUBLIC_ORIGIN, identity: e.HEARTH_IDENTITY, cfTeamDomain: e.HEARTH_CF_TEAM_DOMAIN, cfAud: e.HEARTH_CF_AUD, password: e.HEARTH_PASSWORD, roots: e.HEARTH_ROOTS, autoUpdate: e.HEARTH_AUTO_UPDATE, userAliases: e.HEARTH_USER_ALIASES, updatesUrl: e.HEARTH_UPDATES_URL };
       const file = envFilePath(); const w = writeEnvFile(file, given, defaults);
       console.log(w.created ? `Wrote ${file}` : w.changed.length ? `Updated ${w.changed.join(", ")} in ${file}` : `Using ${file}`);
       for (const n of svc.install({ system: !!f.system })) console.log(n);
@@ -93,6 +94,7 @@ async function main() {
   if (cmd === "serve") {
     const cfg = configFromEnv();
     if (cfg.bind !== "127.0.0.1" && cfg.bind !== "::1") console.warn(`WARNING: binding to ${cfg.bind}; Hearth expects to sit behind a local reverse proxy.`);
+    const nf = nodeFloorCheck(); if (nf.message) console.warn(`WARNING: ${nf.message}`);
     const h = new Hearth(cfg);
     const port = await h.listen();
     console.log(`hearth ${VERSION} listening on http://${cfg.bind}:${port} (identity=${cfg.identity}, password=${cfg.password.split(":")[0]}, auto-update=${cfg.autoUpdate ? "on" : "off"})`);

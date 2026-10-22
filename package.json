@@ -1,6 +1,6 @@
 {
   "name": "hearth-acp",
-  "version": "0.5.7",
+  "version": "0.5.8",
   "description": "Self-hosted daemon + phone-friendly web UI for ACP (Agent Client Protocol) coding agents",
   "main": "dist/main.js",
   "scripts": {
@@ -40,7 +40,7 @@
     "hearth": "dist/main.js"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "files": [
     "dist",

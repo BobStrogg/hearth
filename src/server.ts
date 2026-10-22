@@ -25,6 +25,8 @@ export interface Config extends AuthConfig {
   agentsFile?: string;
   webDir: string;
   autoUpdate: boolean;
+  /** Updates are managed elsewhere (HEARTH_UPDATES_URL, http(s)): no self-update, no release check; the UI links there instead. */
+  updatesUrl?: string;
   /** Browser file manager (list/download/upload/new folder) confined to filesRoot. HEARTH_FILES=off disables it. */
   files: boolean;
   filesRoot: string;
@@ -47,7 +49,8 @@ export function configFromEnv(env = process.env): Config {
     roots: list(env.HEARTH_ROOTS).length ? list(env.HEARTH_ROOTS).map((r) => resolve(r)) : [homedir()],
     agentsFile: env.HEARTH_AGENTS_FILE ?? join(dataDir, "agents.json"),
     webDir: env.HEARTH_WEB_DIR ?? defaultWebDir(),
-    autoUpdate: /^(on|1|true|yes)$/i.test(env.HEARTH_AUTO_UPDATE ?? ""),
+    autoUpdate: /^(on|1|true|yes)$/i.test(env.HEARTH_AUTO_UPDATE ?? "") && !updatesUrl(env.HEARTH_UPDATES_URL),
+    updatesUrl: updatesUrl(env.HEARTH_UPDATES_URL),
     files: !/^(off|0|false|no)$/i.test(env.HEARTH_FILES ?? ""),
     filesRoot: resolve(env.HEARTH_FILES_ROOT || homedir()),
     filesTimeoutMs: Math.max(1000, Number(env.HEARTH_FILES_TIMEOUT_MS) || 15000),
@@ -66,6 +69,10 @@ export function configFromEnv(env = process.env): Config {
 }
 
 const dataDirFor = (env: NodeJS.ProcessEnv) => dataDir(env);
+/** A managed-updates link: http(s) URLs only (it is shown as a link in the UI). */
+export function updatesUrl(v?: string): string | undefined {
+  try { const u = new URL(String(v ?? "").trim()); return u.protocol === "https:" || u.protocol === "http:" ? u.href : undefined; } catch { return undefined; }
+}
 function defaultWebDir(): string { try { return fileURLToPath(new URL("../web", import.meta.url)); } catch { return ""; } }
 /** Web assets: from web/ on disk, or embedded in the single-file binary. */
 function webAsset(webDir: string, rel: string): Buffer | null {
@@ -144,9 +151,9 @@ export class Hearth {
       res((this.server.address() as { port: number }).port);
     }));
   }
-  /** Cached GitHub release lookup (at most hourly unless forced). */
-  async release(force = false): Promise<Release | undefined> {
-    if (!force && Date.now() - this.rel.at < 3600_000) return this.rel.release;
+  /** Cached GitHub release lookup: at most every `maxAgeMs` (the page asks with 10 min; the daily auto-update check forces). */
+  async release(force = false, maxAgeMs = 3600_000): Promise<Release | undefined> {
+    if (!force && Date.now() - this.rel.at < maxAgeMs) return this.rel.release;
     try { this.rel = { at: Date.now(), release: await latestRelease(8000) }; } catch (e) { this.rel = { at: Date.now(), release: this.rel.release, error: String((e as Error).message) }; }
     return this.rel.release;
   }
@@ -155,7 +162,8 @@ export class Hearth {
   /** True while any agent is mid-turn: restarting then would cut it off. */
   busy() { return [...this.live.values()].some((l) => l.turnActive || l.meta.state === "running" || l.pending.size > 0); }
   private async versionInfo(check: boolean) {
-    const rel = check ? await this.release() : this.rel.release;
+    if (this.cfg.updatesUrl) return { version: VERSION, managed: this.cfg.updatesUrl, latest: null, releaseUrl: null, updateAvailable: false, canApply: false, how: `updates are managed at ${this.cfg.updatesUrl}`, autoUpdate: false, updating: false, checkError: null };
+    const rel = check ? await this.release(false, 600_000) : this.rel.release;
     const info = installInfo(); const p = plan(info);
     return { version: VERSION, latest: rel?.version ?? null, releaseUrl: rel?.url ?? null, updateAvailable: !!rel && cmpVer(rel.version, VERSION) > 0,
       method: info.method, canApply: p.canApply && !!process.env.HEARTH_SERVICE, how: p.how, autoUpdate: this.cfg.autoUpdate, updating: Date.now() - this.updating < 5 * 60_000, checkError: this.rel.error ?? null };
@@ -268,6 +276,7 @@ export class Hearth {
     if (url.pathname === "/api/version" && q.method === "GET") return this.send(s, 200, await this.versionInfo(url.searchParams.get("check") === "1"));
     if (url.pathname === "/api/update" && q.method === "POST") {
       // Runs the fixed `hearth update --yes` command as a detached process; takes no input.
+      if (this.cfg.updatesUrl) return this.send(s, 409, { error: `updates are managed at ${this.cfg.updatesUrl}` });
       const v = await this.versionInfo(true);
       if (!v.updateAvailable) return this.send(s, 409, { error: "already up to date" });
       if (!v.canApply) return this.send(s, 409, { error: process.env.HEARTH_SERVICE ? `update this install with: ${v.how}` : "Hearth isn't running as a service: run `hearth update` in a terminal" });

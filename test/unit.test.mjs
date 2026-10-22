@@ -250,3 +250,16 @@ test("PromptQueue: persistence, ordering, edit/move/delete, cap, writes only on 
   const { writeFileSync } = await import("node:fs"); writeFileSync(f, "{nope");
   assert.equal(new PromptQueue(f).items.length, 0);
 });
+
+test("nodeFloorCheck(): patched lines ok, unpatched warn, end-of-life fail or warn", async () => {
+  const { nodeFloorCheck } = await import("../dist/node-floor.js");
+  assert.equal(nodeFloorCheck("22.23.4").level, "ok");
+  assert.equal(nodeFloorCheck("v24.22.1").level, "ok");
+  assert.equal(nodeFloorCheck("26.13.0").level, "ok");
+  assert.equal(nodeFloorCheck("27.0.0").level, "ok");
+  assert.equal(nodeFloorCheck("22.23.3").level, "warn");
+  assert.match(nodeFloorCheck("26.12.0").message, /26\.12\.1/);
+  assert.equal(nodeFloorCheck("25.2.1").level, "warn");
+  assert.equal(nodeFloorCheck("23.11.0").level, "warn");
+  assert.equal(nodeFloorCheck("20.19.2").level, "fail");
+});
