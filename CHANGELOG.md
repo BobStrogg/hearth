@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.3
+- Keyboard mode: Hearth now follows the visual viewport, so on-screen keyboards that resize it (iOS, Android) keep the
+  composer visible. For browsers that draw a keyboard over the page without saying so (for example the Tesla browser), the
+  ⌨︎ button in the header (touch screens only) squeezes the whole app into the top part of the screen. The composer stays
+  pinned at the bottom of that area, and the conversation, the queue and the latest message stay above the keyboard. −/+ set
+  the size (30-80 % of the screen, default 52 %, remembered per device). In the Tesla browser it turns on by itself while
+  any text field has focus (composer, queue edits, file browser, settings) and off when it loses focus, debounced so moving
+  between fields doesn't flap. Sheets, the queue list and images size to the squeezed area.
+
 ## 0.5.2
 - Files: the file browser no longer freezes Hearth. Listing, opening, uploading and new-folder calls were synchronous,
   so a folder macOS protects (Desktop, Documents, Downloads, cloud or network folders) could block the whole server

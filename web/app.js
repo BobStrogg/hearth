@@ -746,6 +746,47 @@ async function notifySheet() {
   sheet.replaceChildren(h("div", { class: "sheet-body" }, ...body));
 }
 
+// ---------- keyboard mode ----------
+// Hearth follows the visual viewport (on-screen keyboards on iOS/Android shrink it). Keyboard mode caps the whole app at
+// a fraction of the screen for browsers that draw a keyboard over the page without reporting it (e.g. the Tesla
+// browser), so the composer, the latest messages and the queue stay above it. ⌨︎ toggles it, −/+ adjust the size
+// (30-80 %, kept per device). In the Tesla browser it turns on by itself while a text field has focus.
+const KB = (() => {
+  const KF = "hearth.kbFrac", TESLA = /Tesla/.test(navigator.userAgent);
+  let frac = Math.min(0.8, Math.max(0.3, +localStorage.getItem(KF) || 0.52));
+  let manual = false, auto = false, veto = false, tmr = 0, raf = 0, lastField = null;
+  const on = () => manual || (auto && !veto);
+  const isField = (el) => !!el && (el.tagName === "TEXTAREA" || el.isContentEditable ||
+    (el.tagName === "INPUT" && !/^(checkbox|radio|button|submit|reset|file|range|color|image|hidden)$/i.test(el.type)));
+  const b = document.body, root = document.documentElement;
+  if (TESLA) root.classList.add("tesla");
+  function apply() {
+    const v = window.visualViewport, k = on();
+    let hgt = v ? v.height : window.innerHeight; const top = v ? v.offsetTop : 0;
+    if (k) hgt = Math.min(hgt, Math.round(window.innerHeight * frac));
+    root.style.setProperty("--apph", `${Math.round(hgt)}px`); root.style.setProperty("--appt", `${Math.round(top)}px`);
+    b.classList.add("vp"); b.classList.toggle("kbm", k);
+    b.classList.toggle("kb", k || (!!v && window.innerHeight - v.height > 120));
+    const t = $("#kbm"); t.classList.toggle("on", k); t.setAttribute("aria-pressed", String(k));
+    cancelAnimationFrame(raf); raf = requestAnimationFrame(() => { // keep the latest message and the field you're typing in visible
+      if (chat && (chat.stick || chat.atEnd)) chat.toEnd();
+      const a = document.activeElement; if (isField(a)) a.scrollIntoView({ block: "nearest" });
+    });
+  }
+  const refocus = () => { if (lastField && lastField.isConnected) lastField.focus({ preventScroll: true }); };
+  for (const id of ["kbm", "kbdm", "kbdp"]) $("#" + id).addEventListener("pointerdown", (e) => e.preventDefault()); // don't steal focus (keeps the keyboard up)
+  $("#kbm").onclick = () => { if (on()) { manual = false; if (auto) veto = true; } else { manual = true; veto = false; } apply(); refocus(); };
+  const step = (d) => { frac = Math.round(Math.min(0.8, Math.max(0.3, frac + d)) * 100) / 100; localStorage.setItem(KF, String(frac)); apply(); refocus(); };
+  $("#kbdm").onclick = () => step(-0.05); $("#kbdp").onclick = () => step(0.05);
+  const setAuto = (val, ms) => { clearTimeout(tmr); tmr = setTimeout(() => { if (auto !== val) { auto = val; if (!val) veto = false; apply(); } }, ms); };
+  document.addEventListener("focusin", (e) => { if (!isField(e.target)) return; lastField = e.target; if (TESLA) setAuto(true, 150); });
+  document.addEventListener("focusout", (e) => { if (TESLA && isField(e.target)) setAuto(false, 600); }); // moving to another field refocuses within 600 ms: no flap
+  if (window.visualViewport) { visualViewport.addEventListener("resize", apply); visualViewport.addEventListener("scroll", apply); }
+  addEventListener("resize", apply); addEventListener("orientationchange", apply);
+  apply();
+  return { apply, on, get frac() { return frac; } };
+})();
+
 // ---------- routing ----------
 async function route() {
   $("#sheet").hidden = true;
