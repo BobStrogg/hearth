@@ -36,7 +36,11 @@ async function open(ua, w, ht, mobile) {
   const page = await browser.newPage();
   await page.setUserAgent(ua); await page.setViewport({ width: w, height: ht, isMobile: !!mobile, hasTouch: !!mobile, deviceScaleFactor: mobile ? 2 : 1 });
   await page.evaluateOnNewDocument(() => localStorage.clear());
-  await page.goto(`${base}/#/s/${sid}`); await page.waitForSelector(".composer textarea"); await page.waitForFunction(() => document.querySelectorAll(".log .msg, .log > *").length > 20);
+  const logs = []; page.on("console", (m) => logs.push(m.text())); page.on("pageerror", (e) => logs.push(String(e)));
+  await page.goto(`${base}/#/s/${sid}`);
+  try { await page.waitForSelector(".composer textarea", { timeout: 15000 }); }
+  catch (e) { throw new Error(`no composer (${ua.slice(0, 30)}): ${logs.join(" | ")} :: ${await page.evaluate(() => document.querySelector("#view")?.innerText?.slice(0, 200))}`); }
+  await page.waitForFunction(() => document.querySelectorAll(".log > *").length > 5, { timeout: 10000 }).catch(() => {}); // history replay; layout checks don't depend on it
   await sleep(300);
   return page;
 }

@@ -1,6 +1,10 @@
 # Changelog
 
-## 0.5.3
+## 0.5.4
+- Same as 0.5.3, which was tagged but never published (a timing-sensitive browser test failed on one CI runner; the test now
+  waits for the history replay more tolerantly and reports what the page showed if it fails).
+
+## 0.5.3 (not published)
 - Keyboard mode: Hearth now follows the visual viewport, so on-screen keyboards that resize it (iOS, Android) keep the
   composer visible. For browsers that draw a keyboard over the page without saying so (for example the Tesla browser), the
   ⌨︎ button in the header (touch screens only) squeezes the whole app into the top part of the screen. The composer stays
