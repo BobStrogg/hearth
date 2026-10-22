@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.7
+- Sending into a stopped session never looks ignored. While the agent is respawned and its session reloaded (which can
+  take a while with a long conversation), the chat shows "Starting the agent…" and the status reads "starting", on every
+  device viewing it, including ones that open it meanwhile.
+- Agent start-up has deadlines: each step (initialize, session/load or resume, session/new) gets 120 s. A session/load
+  that hangs falls back to a fresh agent session (the earlier history stays on screen) so the message still goes; any
+  other start failure shows "couldn't start the agent: …" in the chat and leaves no half-started agent behind, so the
+  next send starts cleanly.
+- A send while the page isn't connected (Hearth restarting after an update, a network drop) used to do nothing. Now it
+  says it's reconnecting, keeps the message and sends it once the connection is back.
+
 ## 0.5.6
 - Prompt queue: queued prompts no longer get stuck after the agent was stopped or sat idle. The queue now drains whenever
   the agent is free: after any turn ends (a Stop or cancel ends only that prompt; the queue carries on), after the agent

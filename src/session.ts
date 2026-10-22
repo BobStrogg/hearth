@@ -17,9 +17,12 @@ export type LiveEvent =
   | { type: "permission_resolved"; id: string; optionId?: string }
   | { type: "prompt_done"; stopReason: string }
   | { type: "error"; message: string }
+  | { type: "agent_starting" }
+  | { type: "agent_ready" }
   | { type: "settings"; options: UiOption[] }
   | ({ type: "queue" } & QueueView);
 
+class StartTimeout extends Error {}
 interface Pending { params: acp.RequestPermissionRequest; resolve: (r: acp.RequestPermissionResponse) => void }
 export interface Term { buf: Buffer; truncated: boolean; exit?: { exitCode: number | null; signal: string | null }; done: Promise<void>; text(): string; kill(): void }
 
@@ -235,9 +238,22 @@ export class LiveSession {
   get alive() { return !!this.child && this.child.exitCode === null && !this.child.killed; }
 
   /** Spawn the agent (if needed), initialize, and create or load the ACP session. */
+  /** How long the agent gets to answer each start-up step (initialize, session/load or resume, session/new). */
+  static START_TIMEOUT_MS = 120_000;
+  /** True while the agent is being spawned and its session loaded (clients show "Starting the agent…"). */
+  get isStarting() { return !!this.starting; }
   ensureRunning(): Promise<void> {
     if (this.alive && this.conn && this.meta.agentSessionId) return Promise.resolve();
-    this.starting ??= this.start().then(() => {
+    if (!this.starting) this.emit({ type: "agent_starting" });
+    this.starting ??= this.start().catch(async (e) => {
+      // A start that failed or timed out must not leave a half-started agent behind: the next send starts afresh.
+      const c = this.child;
+      if (c && c.exitCode === null) { this.recycling = true; try { await this.killChild(c); } catch { /* gone */ } finally { this.recycling = false; } }
+      this.child = undefined; this.conn = undefined;
+      if (this.meta.state !== "exited") this.setState("stopped");
+      throw new Error(`couldn't start the agent: ${String((e as Error)?.message ?? e)}`);
+    }).then(() => {
+      this.emit({ type: "agent_ready" });
       // The agent (re)started: a queue paused by a failure tries again now, and a waiting queue drains.
       if (this.retryAt) this.retryAt = 1;
       setImmediate(() => this.kick());
@@ -258,6 +274,12 @@ export class LiveSession {
       child.once("exit", (code, sig) => rej(new Error(`agent exited (${code ?? sig})`)));
     });
     exited.catch(() => {});
+    const step = <T,>(p: Promise<T>, what: string): Promise<T> => {
+      let t: NodeJS.Timeout | undefined;
+      const ms = LiveSession.START_TIMEOUT_MS;
+      const late = new Promise<never>((_, rej) => { t = setTimeout(() => rej(new StartTimeout(`the agent didn't answer ${what} within ${Math.round(ms / 1000)} s`)), ms); t.unref?.(); });
+      return Promise.race([p, exited, late]).finally(() => clearTimeout(t));
+    };
     child.once("exit", (code, signal) => {
       this.log("sys", { event: "agent_exit", code, signal, stderrTail: tail.split("\n").slice(-8).join("\n") || undefined });
       for (const [id, p] of this.pending) { p.resolve({ outcome: { outcome: "cancelled" } }); this.emit({ type: "permission_resolved", id }); }
@@ -282,11 +304,11 @@ export class LiveSession {
     const writable = new WritableStream({ async write(msg) { self.log("out", msg); await w.write(msg); }, close: () => w.close() });
     this.conn = new acp.ClientSideConnection(() => this.clientHandler(), { readable, writable } as acp.Stream);
 
-    const init = await Promise.race([this.conn.initialize({
+    const init = await step(this.conn.initialize({
       protocolVersion: acp.PROTOCOL_VERSION,
       clientCapabilities: { fs: { readTextFile: true, writeTextFile: true }, terminal: true },
       clientInfo: { name: "hearth", version: VERSION },
-    }), exited]);
+    }), "initialize");
     this.caps = init;
     const prior = this.meta.agentSessionId;
     const caps = init.agentCapabilities ?? {};
@@ -297,7 +319,7 @@ export class LiveSession {
       this.loading = !seeding;
       try {
         if (seeding) this.log("sys", { event: "import_replay_start", agentSessionId: prior });
-        const lr = await Promise.race([this.conn.loadSession({ sessionId: prior, cwd: this.meta.cwd, mcpServers: [] }), exited]);
+        const lr = await step(this.conn.loadSession({ sessionId: prior, cwd: this.meta.cwd, mcpServers: [] }), "session/load");
         this.updateSettings(absorb(this.meta.settings ?? {}, lr as never));
         this.log("sys", { event: seeding ? "session_imported" : "session_loaded", agentSessionId: prior, via: "load" });
         // Some agents keep replaying history after answering session/load; it's already in our transcript.
@@ -305,6 +327,12 @@ export class LiveSession {
         done = true;
       } catch (e) {
         this.log("sys", { event: "session_load_failed", error: String((e as Error)?.message ?? e) });
+        if (e instanceof StartTimeout) {
+          // A load that hangs leaves the agent wedged: start a fresh process that doesn't try to load.
+          this.loading = false; this.recycling = true;
+          try { await this.killChild(child); } finally { this.recycling = false; }
+          return this.start(true);
+        }
       } finally { this.loading = false; }
       if (!done && canResume) {
         // Some agents (seen with Devin) attach the session even when session/load fails, so a resume on the same
@@ -316,7 +344,7 @@ export class LiveSession {
     }
     if (!done && prior && canResume) {
       try {
-        const rr = await Promise.race([this.conn.resumeSession({ sessionId: prior, cwd: this.meta.cwd, mcpServers: [] }), exited]);
+        const rr = await step(this.conn.resumeSession({ sessionId: prior, cwd: this.meta.cwd, mcpServers: [] }), "session/resume");
         this.updateSettings(absorb(this.meta.settings ?? {}, rr as never));
         this.log("sys", { event: seeding ? "session_imported" : "session_resumed", agentSessionId: prior, via: "resume",
           note: seeding ? "agent resumed the session but doesn't replay history over ACP; earlier messages aren't shown" : undefined });
@@ -328,7 +356,7 @@ export class LiveSession {
     if (!done) {
       if (seeding) throw new Error("this agent couldn't load or resume that session");
       if (prior) this.log("sys", { event: "context_reset", reason: "agent could not load or resume the session; earlier history is display-only" });
-      await this.newAgentSession(exited);
+      await this.newAgentSession(step);
     }
     if (seeding) { this.meta.seeded = true; if (this.meta.importedFrom) this.meta.importedFrom.via = this.meta.agentSessionId === prior ? (caps.loadSession ? "load" : "resume") : "pending"; this.store.save(this.meta); }
     this.setState("idle");
@@ -345,8 +373,8 @@ export class LiveSession {
     await gone; clearTimeout(t);
   }
 
-  private async newAgentSession(exited: Promise<never>) {
-    const r = await Promise.race([this.conn!.newSession({ cwd: this.meta.cwd, mcpServers: [] }), exited]);
+  private async newAgentSession(step: <T>(p: Promise<T>, what: string) => Promise<T>) {
+    const r = await step(this.conn!.newSession({ cwd: this.meta.cwd, mcpServers: [] }), "session/new");
     this.meta.agentSessionId = r.sessionId;
     this.updateSettings(absorb({}, r as never));
     this.newlyCreated = true;

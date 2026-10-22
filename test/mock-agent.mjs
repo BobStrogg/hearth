@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { existsSync as existsSyncM } from "node:fs";
 // Minimal ACP agent used by the e2e tests. Behaviour is driven by the prompt text.
 import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
@@ -42,6 +43,8 @@ let n = 0;
 
 new acp.AgentSideConnection((conn) => ({
   async initialize() {
+    if (process.env.MOCK_SLOW_START) await new Promise((r) => setTimeout(r, Number(process.env.MOCK_SLOW_START)));
+    if (process.env.MOCK_HANG_INIT && existsSyncM(process.env.MOCK_HANG_INIT)) await new Promise(() => {}); // never answers
     return { protocolVersion: acp.PROTOCOL_VERSION, agentCapabilities: { loadSession: LOAD, sessionCapabilities: { ...(LIST ? { list: {} } : {}), ...(RESUME ? { resume: {} } : {}) } }, authMethods: [], agentInfo: { name: "mock-agent", version: "1" } };
   },
   async newSession({ cwd }) { const id = `mock-${++n}-${process.pid}`; const st = fresh(cwd); sessions.set(id, st);
@@ -67,6 +70,7 @@ new acp.AgentSideConnection((conn) => ({
     sessions.set(sessionId, fresh(cwd)); attach(sessionId); return {};
   },
   async loadSession({ sessionId, cwd }) {
+    if (process.env.MOCK_HANG_LOAD && existsSyncM(process.env.MOCK_HANG_LOAD)) await new Promise(() => {}); // a wedged session/load
     sessions.set(sessionId, fresh(cwd)); attach(sessionId);
     if (LOAD_FAIL) throw acp.RequestError.internalError({}, "load exploded after attaching");
     if (LATE && STORE[sessionId]) {

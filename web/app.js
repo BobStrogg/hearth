@@ -257,15 +257,32 @@ class Chat {
   }
   status(s) {
     setHeader($("#title").textContent, { back: true, menu: true, status: s }); this.stopBtn.hidden = s !== "running";
+    this.state = s; if (s === "running" || s === "idle") this.starting(false);
     this.busy = s === "running"; this.sendBtn.textContent = this.busy ? "Queue" : "Send";
     this.sendBtn.title = this.busy ? "The agent is busy: this prompt waits in the queue and runs next" : "";
     this.renderQueue();
   }
   send() {
-    const text = this.input.value.trim(); if (!text || this.ws?.readyState !== 1) return;
+    const text = this.input.value.trim(); if (!text) return;
+    if (this.ws?.readyState !== 1) {
+      // Not connected (Hearth restarting after an update, network drop): never drop the message silently. It stays
+      // in the box and goes as soon as the connection is back.
+      this.pendingSend = text;
+      if (!this.waitNote?.isConnected) { this.waitNote = h("div", { class: "note" }, "Not connected to this computer. Reconnecting… your message will be sent as soon as it's back."); this.log.append(this.waitNote); this.toEnd?.(); }
+      this.retry = 0; this.connect();
+      return;
+    }
     if (this.busy && this.queue.items.length >= this.queue.max) return this.note(`The queue is full (${this.queue.max} prompts). Wait for the agent, or remove a queued prompt.`, "err");
     this.ws.send(JSON.stringify({ type: "prompt", content: [{ type: "text", text }] }));
+    if (this.state === "stopped" || this.state === "offline") this.starting(true); // immediate feedback; the server confirms
     this.input.value = ""; this.grow();
+  }
+  /** "Starting the agent…" while it is spawned and its session reloaded (can take a while), so a send never looks ignored. */
+  starting(on) {
+    if (on) {
+      if (!this.startNote?.isConnected) { this.startNote = h("div", { class: "note starting" }, "Starting the agent… your message goes as soon as it's ready."); this.log.append(this.startNote); this.toEnd?.(); }
+      setHeader($("#title").textContent, { back: true, menu: true, status: "starting" });
+    } else if (this.startNote) { this.startNote.remove(); this.startNote = null; }
   }
   qsend(o) { if (this.ws?.readyState === 1) this.ws.send(JSON.stringify(o)); }
   /**
@@ -404,12 +421,18 @@ class Chat {
     else if (m.type === "state") { setHeader(m.title, { back: true, menu: true, status: m.state }); this.status(m.state); this.title = m.title; }
     else if (m.type === "settings") { this.options = m.options || []; this.renderCtl(); if (!$("#sheet").hidden && this.settingsOpen) this.openSettings(); }
     else if (m.type === "permission") this.addPerm(m);
-    else if (m.type === "queue") { this.queue = { items: m.items || [], paused: !!m.paused, reason: m.reason ?? null, max: m.max || 10 }; this.renderQueue(); }
+    else if (m.type === "queue") {
+      this.queue = { items: m.items || [], paused: !!m.paused, reason: m.reason ?? null, max: m.max || 10 }; this.renderQueue();
+      // the first queue update comes after the replay and state on (re)connect: send what was typed while offline
+      if (this.pendingSend && this.ws?.readyState === 1) { this.pendingSend = null; this.waitNote?.remove(); this.waitNote = null; if (this.input.value.trim()) this.send(); }
+    }
     else if (m.type === "queued") { /* shown by the queue update */ }
+    else if (m.type === "agent_starting") this.starting(true);
+    else if (m.type === "agent_ready") this.starting(false);
     else if (m.type === "permission_resolved") { this.perms.get(m.id)?.remove(); this.perms.delete(m.id); }
     else if (m.type === "prompt_done") { this.cur = null; if (m.stopReason !== "end_turn") this.note(`Stopped: ${m.stopReason}`); }
     else if (m.type === "error" && /setting|config|mode|model/i.test(m.message) && this.options.length) { this.renderCtl(); this.note(m.message, "err"); }
-    else if (m.type === "error") this.note(/auth/i.test(m.message) ? `${m.message}. Sign in to this agent once on the computer itself (for example run "claude" then /login, or "grok login").` : m.message, "err");
+    else if (m.type === "error") { this.starting(false); this.note(/auth/i.test(m.message) ? `${m.message}. Sign in to this agent once on the computer itself (for example run "claude" then /login, or "grok login").` : m.message, "err"); }
     if (atBottom || initial) this.toEnd();
     if (initial) { this.watch(this.log); this.fillScreen(); }
   }

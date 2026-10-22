@@ -481,6 +481,7 @@ export class Hearth {
     send({ type: "state", state: l.meta.state, title: l.meta.title });
     send({ type: "settings", options: l.options });
     send({ type: "queue", ...l.queue.view() });
+    if (l.isStarting) send({ type: "agent_starting" });
     l.kick(); // a device (re)connecting is a good moment to drain a queue that is waiting on an idle agent
     for (const [pid, p] of l.pending) send({ type: "permission", id: pid, params: p.params });
     replaying = false;
