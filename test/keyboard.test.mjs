@@ -54,7 +54,8 @@ const geo = (page) => page.evaluate(() => {
 test("Tesla 1920x1200: keyboard mode follows focus on the composer and other fields, debounced; ⌨︎ and −/+", { skip: !CHROME && "no Chrome" }, async () => {
   const page = await open(TESLA_UA, 1920, 1200);
   let g = await geo(page); assert.equal(g.kbm, false); assert.ok(Math.abs(g.body - 1200) < 2, `full height ${g.body}`); assert.ok(g.toggleShown, "⌨︎ shown in the Tesla browser");
-  await page.focus(".composer textarea"); await sleep(400);
+  await page.focus(".composer textarea");
+  await page.waitForFunction(() => document.body.classList.contains("kbm"), { timeout: 3000 }).catch(() => {}); await sleep(150); // slow CI runners
   g = await geo(page); assert.equal(g.kbm, true); assert.ok(Math.abs(g.body - 624) < 2, `52% of 1200 = 624, got ${g.body}`);
   assert.ok(g.taBottom <= 624 && g.taTop > 400, `composer pinned at the bottom of the squeezed app (${g.taTop}-${g.taBottom})`); assert.ok(g.atEnd, "conversation at the latest message"); assert.ok(g.stepShown);
   if (SHOTS) await page.screenshot({ path: join(SHOTS, "hearth-tesla-keyboard.png") });
@@ -73,7 +74,7 @@ test("Tesla 1920x1200: keyboard mode follows focus on the composer and other fie
   // Other text fields (the file browser) trigger it too.
   await page.goto(`${base}/#/files`); await page.waitForSelector(".files");
   await page.evaluate(() => { const i = document.createElement("input"); i.type = "text"; i.id = "probe"; document.querySelector("#view").prepend(i); });
-  await page.focus("#probe"); await sleep(400); assert.equal(await page.evaluate(() => document.body.classList.contains("kbm")), true, "any text input");
+  await page.focus("#probe"); await sleep(400); await page.waitForFunction(() => document.body.classList.contains("kbm"), { timeout: 3000 }).catch(() => {}); assert.equal(await page.evaluate(() => document.body.classList.contains("kbm")), true, "any text input");
   await page.close();
 });
 
