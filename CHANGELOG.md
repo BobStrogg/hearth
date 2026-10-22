@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.0
+- Notifications: each device can opt in (🔔 on the session list) to Web Push notifications when an agent finishes a
+  turn (with the end of its reply; errors and unusual stop reasons say so) or is waiting for approval. Nothing is sent
+  for a session you're looking at, for your own Stop, or while the queue moves straight on to the next prompt. VAPID +
+  aes128gcm implemented with node:crypto (no new dependencies); keys in `vapid.json`, subscriptions per user; gone
+  subscriptions (404/410) are dropped. Choose per device: finished, approval, or both; "Send a test". iPhone/iPad need
+  Hearth added to the Home Screen. New `web/sw.js` (notifications only, no caching). `HEARTH_PUSH=off` disables it.
+- Files: 📁 Files lists, downloads (streamed, always as attachments) and uploads files (8 MB chunks, resumable, explicit
+  overwrite) and creates folders, confined to `HEARTH_FILES_ROOT` (default: home). `..`, absolute paths and symlinks
+  leaving the root are refused; such links are hidden from listings. `HEARTH_FILES=off` disables it.
+- `/api/me` reports whether files and notifications are available.
+
 ## 0.4.4
 - Prompt queue: sending while the agent is busy queues the prompt (the send button reads "Queue") instead of failing
   with "agent is busy". The queue is per session, kept on the machine in `sessions/<id>/queue.json` (written only when

@@ -18,6 +18,12 @@ Cursor and Devin.
   normally the next one runs by itself, in order. After an error, a Stop, or any other stop reason the queue pauses
   until you press Resume. Queued prompts can be edited, reordered (↑/↓ or drag), deleted, or sent now (stops the
   current turn first). After a Hearth restart a leftover queue waits for Resume.
+- **Notifications.** Each phone or computer can opt in (🔔 on the session list) to Web Push notifications when an
+  agent finishes a turn or is waiting for your approval, even with Hearth closed. Skipped while you're looking at that
+  session. Standard VAPID Web Push, encrypted end to end, no third-party account; on iPhone/iPad add Hearth to the
+  Home Screen first.
+- **Files in the browser.** Browse, download and upload files (📁 Files) in your home folder, with nothing to install.
+  Downloads stream; uploads are chunked and resume after a dropped connection.
 - **Updates itself.** `hearth update` (and the optional auto-update) pulls a verified release from GitHub, restarts the
   service and rolls back if the health check fails. The web UI shows the installed version and an "Update now" button.
 - **Private by design.** It listens on 127.0.0.1 only. Each session belongs to the identity that created it. Host,
@@ -90,6 +96,11 @@ An existing `~/.hearth` is kept on every OS. Override with `HEARTH_HOME` / `HEAR
 | `HEARTH_UNLOCK_TTL_HOURS` | `12` | How long an unlock lasts |
 | `HEARTH_ROOTS` | `$HOME` | Comma-separated folders that sessions and the folder picker may use |
 | `HEARTH_AUTO_UPDATE` | `off` | `on` = daily check against GitHub Releases; restarts when idle (force after 24h); rolls back if `/healthz` fails |
+| `HEARTH_FILES` | `on` | `off` hides the file browser and its API |
+| `HEARTH_FILES_ROOT` | `$HOME` | The only folder the file browser can see (symlinks are resolved; links leading out of it are hidden and refused) |
+| `HEARTH_PUSH` | `on` | `off` turns notifications off. When on, nothing is sent until a device opts in |
+| `HEARTH_PUSH_SUBJECT` | first `https://` allowed origin | VAPID contact (`mailto:` or `https:` URL) sent to push services |
+| `HEARTH_PUSH_HOSTS` | | Extra push-service hosts to allow (Google, Mozilla, Apple and Microsoft are built in) |
 
 ## Supported agents
 
@@ -121,6 +132,13 @@ Add or override agents in `agents.json` next to the data directory:
 - **Requests:** Host and Origin must match `HEARTH_ALLOWED_ORIGINS`. State-changing requests also need `X-Hearth-CSRF: 1`.
   WebSockets check Origin. A strict CSP is set, with no third-party scripts. Images from the session folder are served
   only through an authenticated endpoint that restricts to image types inside that folder.
+- **Files:** the file browser only sees `HEARTH_FILES_ROOT` (real paths are checked, so `..` and symlinks can't leave
+  it). Downloads are always sent as attachments with a sandbox CSP, never rendered on Hearth's origin. Uploads need the
+  CSRF header and write through a hidden temp file that is renamed into place; an existing file is only replaced
+  after you confirm.
+- **Notifications:** the VAPID key pair lives in the data dir (`vapid.json`, mode 600) and subscriptions per user in
+  `users/<id>/push.json`. Payloads (session title, the end of the reply or the tool awaiting approval) are encrypted
+  for the subscribing device (RFC 8291); Hearth only posts to known push-service hosts.
 - **Agents run as you.** An agent can do anything your account can, which is why the password unlock is on by default on
   macOS.
 - **Updates:** release assets are checked against the release's `SHA256SUMS` before anything is installed. The web UI's

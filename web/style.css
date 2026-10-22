@@ -74,3 +74,10 @@ figcaption { margin-top:.2rem; font-size:.75rem; }
 .qbtn.qresume { margin-left:auto; color:var(--acc); border-color:var(--acc); } .qbtn.qdel:hover { color:var(--bad); border-color:var(--bad); }
 .qedit { flex:1; min-height:0; resize:vertical; font-size:.85rem; padding:.35rem .5rem; }
 @media (max-width:480px) { .qitem { flex-wrap:wrap; } .qitem .qacts { margin-left:auto; } }
+.crumbs{font-size:14px;overflow-wrap:anywhere}.crumbs a{color:inherit}
+.files .file{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px 12px;cursor:pointer}
+.files .fname{overflow-wrap:anywhere;color:inherit;text-decoration:none;flex:1}.files .meta{white-space:nowrap}
+.uploads .upl{display:flex;gap:8px;align-items:center;font-size:13px;margin:4px 0}.uploads progress{flex:1}.uploads .ok progress{accent-color:#3c9}
+.hid{display:flex;align-items:center;gap:4px}
+.toolbar { flex-wrap:wrap; }
+.toolbar button { white-space:nowrap; } .toolbar .row { flex-wrap:wrap; justify-content:flex-end; }

@@ -1,7 +1,7 @@
 import { readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { homedir } from "node:os";
-import { basename, extname, join, resolve } from "node:path";
+import { basename, dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer, type WebSocket } from "ws";
 import { type AgentDef, deepProbe, loadAgents, probe } from "./agents.js";
@@ -13,6 +13,8 @@ import { pidFile } from "./service.js";
 import { cmpVer, latestRelease, plan, type Release, spawnUpdater } from "./update.js";
 import { VERSION } from "./version.js";
 import { LiveSession, within } from "./session.js";
+import { Files, FilesError } from "./files.js";
+import { DEFAULT_PUSH_HOSTS, endpointOk, Push, replyTail, snippet, validSubscription } from "./push.js";
 const HISTORY_TURNS = 8;
 import { dedupeFanout, type SessionMeta, Store } from "./store.js";
 
@@ -23,6 +25,13 @@ export interface Config extends AuthConfig {
   agentsFile?: string;
   webDir: string;
   autoUpdate: boolean;
+  /** Browser file manager (list/download/upload/new folder) confined to filesRoot. HEARTH_FILES=off disables it. */
+  files: boolean;
+  filesRoot: string;
+  /** Web Push notifications (each device opts in from the UI). HEARTH_PUSH=off disables them. */
+  push: boolean;
+  pushSubject?: string;
+  pushHosts: string[];
 }
 
 export function configFromEnv(env = process.env): Config {
@@ -35,6 +44,11 @@ export function configFromEnv(env = process.env): Config {
     agentsFile: env.HEARTH_AGENTS_FILE ?? join(dataDir, "agents.json"),
     webDir: env.HEARTH_WEB_DIR ?? defaultWebDir(),
     autoUpdate: /^(on|1|true|yes)$/i.test(env.HEARTH_AUTO_UPDATE ?? ""),
+    files: !/^(off|0|false|no)$/i.test(env.HEARTH_FILES ?? ""),
+    filesRoot: resolve(env.HEARTH_FILES_ROOT || homedir()),
+    push: !/^(off|0|false|no)$/i.test(env.HEARTH_PUSH ?? ""),
+    pushSubject: env.HEARTH_PUSH_SUBJECT || undefined,
+    pushHosts: [...DEFAULT_PUSH_HOSTS, ...list(env.HEARTH_PUSH_HOSTS).map((h) => h.toLowerCase())],
     identity: env.HEARTH_IDENTITY ?? "single:",
     cfTeamDomain: env.HEARTH_CF_TEAM_DOMAIN, cfAud: env.HEARTH_CF_AUD,
     allowedUsers: list(env.HEARTH_ALLOWED_USERS).map((u) => u.toLowerCase()),
@@ -90,11 +104,20 @@ export class Hearth {
   private deepCache = new Map<string, unknown>();
   private rel: { at: number; release?: Release; error?: string } = { at: 0 };
   private updating = 0; private pendingSince = 0; private autoTimer?: NodeJS.Timeout;
+  files: Files | null = null; push: Push | null = null;
+  /** Sockets currently looking at a session (tab visible and focused): no push for that session while > 0. */
+  private viewers = new Map<string, Set<WebSocket>>();
 
   constructor(readonly cfg: Config) {
     this.store = new Store(cfg.dataDir);
     this.auth = new Auth(cfg);
     this.agents = loadAgents(cfg.agentsFile);
+    if (cfg.files) { try { this.files = new Files(cfg.filesRoot); } catch { this.files = null; } }
+    if (cfg.push) {
+      // VAPID "sub" must be a mailto: or https: contact; default to this server's public origin.
+      const subject = cfg.pushSubject || cfg.allowedOrigins.find((o) => o.startsWith("https://")) || "https://github.com/BobStrogg/hearth";
+      try { this.push = new Push(cfg.dataDir, (o) => dirname(this.store.userDir(o)), subject, cfg.pushHosts); } catch { this.push = null; }
+    }
     // Daemon restart: nothing is running any more.
     for (const m of this.store.all()) if (m.state === "running" || m.state === "idle") { m.state = "stopped"; this.store.save(m); }
     this.server.on("upgrade", (req, sock, head) => { this.upgrade(req, sock as never, head).catch(() => sock.destroy()); });
@@ -164,8 +187,39 @@ export class Hearth {
       if (!a) throw new Error(`unknown agent ${m.agentId}`);
       l = new LiveSession(m, a, this.store);
       this.live.set(m.id, l);
+      this.notifyOn(l);
     }
     return l;
+  }
+
+  private watching(id: string) { return (this.viewers.get(id)?.size ?? 0) > 0; }
+  /** Push "finished" (the turn ended and nothing queued runs next) and "needs approval" to the owner's devices. */
+  private notifyOn(l: LiveSession) {
+    if (!this.push) return;
+    let tail = "";
+    const url = () => `./#/s/${l.meta.id}`, topic = () => l.meta.id.replace(/-/g, "");
+    l.listeners.add((e) => {
+      const push = this.push!;
+      if (e.type === "entry") {
+        const msg = e.entry.msg as { method?: string; params?: { update?: { sessionUpdate?: string; content?: { type?: string; text?: string } } } };
+        if (e.entry.dir === "out" && msg?.method === "session/prompt") tail = "";
+        else if (e.entry.dir === "in" && msg?.method === "session/update" && msg.params?.update?.sessionUpdate === "agent_message_chunk" && msg.params.update.content?.type === "text")
+          tail = replyTail(tail, String(msg.params.update.content.text ?? ""));
+      } else if (e.type === "prompt_done" || e.type === "error") {
+        if (e.type === "prompt_done" && e.stopReason === "cancelled") return; // you stopped it yourself
+        const problem = e.type === "error" ? `Failed: ${e.message}` : e.stopReason !== "end_turn" ? `Stopped: ${e.stopReason}` : "";
+        setTimeout(() => {
+          if (l.turnActive || this.watching(l.meta.id)) return; // the queue moved on, or you're looking at it
+          const q = l.queue.items.length;
+          void push.notify(l.meta.owner, "done", { title: `${l.meta.title}: ${problem ? "needs a look" : "done"}`,
+            body: (problem || snippet(tail) || "The agent finished.") + (q && l.queue.paused ? ` (${q} queued, paused)` : ""), url: url(), tag: `s-${l.meta.id}` }, topic()).catch(() => {});
+        }, 100);
+      } else if (e.type === "permission") {
+        if (this.watching(l.meta.id)) return;
+        const t = e.params?.toolCall?.title || "an action";
+        void push.notify(l.meta.owner, "perm", { title: `${l.meta.title}: needs your approval`, body: snippet(String(t), 160), url: url(), tag: `s-${l.meta.id}` }, topic()).catch(() => {});
+      }
+    });
   }
 
   private view(m: SessionMeta) {
@@ -185,7 +239,7 @@ export class Hearth {
     const mutating = q.method !== "GET" && q.method !== "HEAD";
     if (mutating && !this.auth.csrfOk(q)) return this.send(s, 403, { error: "csrf/origin check failed" });
 
-    if (url.pathname === "/api/me") return this.send(s, 200, { user: who, needsPassword: this.auth.needsPassword, unlocked: this.auth.unlocked(q, who) });
+    if (url.pathname === "/api/me") return this.send(s, 200, { user: who, needsPassword: this.auth.needsPassword, unlocked: this.auth.unlocked(q, who), files: !!this.files, push: !!this.push });
     if (url.pathname === "/api/unlock" && q.method === "POST") {
       const b = await this.body(q);
       if (!(await this.auth.checkPassword(who, String(b.password ?? "")))) return this.send(s, 403, { error: "wrong password" });
@@ -193,6 +247,8 @@ export class Hearth {
     }
     if (!this.auth.unlocked(q, who)) return this.send(s, 423, { error: "locked" });
 
+    if (url.pathname.startsWith("/api/files")) return this.filesApi(q, s, url);
+    if (url.pathname.startsWith("/api/push")) return this.pushApi(q, s, url, who);
     if (url.pathname === "/api/version" && q.method === "GET") return this.send(s, 200, await this.versionInfo(url.searchParams.get("check") === "1"));
     if (url.pathname === "/api/update" && q.method === "POST") {
       // Runs the fixed `hearth update --yes` command as a detached process; takes no input.
@@ -292,6 +348,56 @@ export class Hearth {
     return this.send(s, 404, { error: "not found" });
   }
 
+  private async filesApi(q: IncomingMessage, s: ServerResponse, url: URL) {
+    const f = this.files;
+    if (!f) return this.send(s, 404, { error: "the file browser is turned off (HEARTH_FILES=off)" });
+    const path = url.searchParams.get("path") ?? "";
+    try {
+      if (url.pathname === "/api/files" && q.method === "GET") return this.send(s, 200, { ...f.list(path, url.searchParams.get("hidden") === "1"), root: f.root });
+      if (url.pathname === "/api/files/download" && q.method === "GET") return await f.download(path, s, SEC_HEADERS);
+      if (url.pathname === "/api/files/mkdir" && q.method === "POST") { const b = await this.body(q); return this.send(s, 201, f.mkdir(String(b.path ?? ""), String(b.name ?? ""))); }
+      if (url.pathname === "/api/files/upload" && q.method === "POST") {
+        const n = (k: string) => Number(url.searchParams.get(k) ?? NaN);
+        const r = await f.upload(q, { rel: path, name: url.searchParams.get("name") ?? "", id: url.searchParams.get("id") ?? "", offset: n("offset"), total: n("total"), overwrite: url.searchParams.get("overwrite") === "1" });
+        return this.send(s, r.done ? 201 : 200, r);
+      }
+      return this.send(s, 404, { error: "not found" });
+    } catch (e) {
+      if (s.headersSent) { s.destroy(); return; }
+      if (e instanceof FilesError) return this.send(s, e.status, { error: e.message, ...((e as unknown as { have?: number }).have !== undefined ? { have: (e as unknown as { have: number }).have } : {}) });
+      const code = (e as NodeJS.ErrnoException).code;
+      return this.send(s, code === "EACCES" || code === "EPERM" ? 403 : code === "ENOENT" ? 404 : 500, { error: code === "EACCES" || code === "EPERM" ? "permission denied" : String((e as Error).message) });
+    }
+  }
+
+  private async pushApi(q: IncomingMessage, s: ServerResponse, url: URL, who: string) {
+    const p = this.push;
+    if (url.pathname === "/api/push" && q.method === "GET") return this.send(s, 200, { enabled: !!p, publicKey: p?.vapid.publicKey ?? null, devices: p ? p.store.list(who).map((x) => ({ endpointHost: new URL(x.endpoint).host, label: x.label ?? null, created: x.created, prefs: x.prefs, endpoint: x.endpoint })) : [] });
+    if (!p) return this.send(s, 404, { error: "notifications are turned off (HEARTH_PUSH=off)" });
+    if (q.method !== "POST") return this.send(s, 404, { error: "not found" });
+    const b = await this.body(q);
+    const sub = b.subscription as { endpoint?: string; keys?: { p256dh?: string; auth?: string } } | undefined;
+    if (sub?.keys) { sub.keys.p256dh = String(sub.keys.p256dh ?? "").replace(/=+$/, ""); sub.keys.auth = String(sub.keys.auth ?? "").replace(/=+$/, ""); }
+    if (url.pathname === "/api/push/subscribe") {
+      if (!validSubscription(sub)) return this.send(s, 400, { error: "bad subscription" });
+      if (!endpointOk(sub.endpoint, p.hosts)) return this.send(s, 400, { error: "unsupported push service" });
+      const pr = (b.prefs ?? {}) as { done?: unknown; perm?: unknown };
+      p.store.upsert(who, { endpoint: sub.endpoint, keys: { p256dh: sub.keys.p256dh, auth: sub.keys.auth }, prefs: { done: pr.done !== false, perm: pr.perm !== false },
+        created: new Date().toISOString(), label: typeof b.label === "string" ? b.label.slice(0, 60) : undefined });
+      return this.send(s, 200, { ok: true });
+    }
+    if (url.pathname === "/api/push/unsubscribe") return this.send(s, 200, { ok: true, removed: p.store.remove(who, String(b.endpoint ?? sub?.endpoint ?? "")) });
+    if (url.pathname === "/api/push/test") {
+      const ep = String(b.endpoint ?? "");
+      const subs = p.store.list(who).filter((x) => !ep || x.endpoint === ep);
+      if (!subs.length) return this.send(s, 404, { error: "this device isn't subscribed" });
+      const r = await Promise.all(subs.map((x) => p.sendOne(who, x, { title: "Hearth", body: "Test notification: this device will be told when an agent finishes or needs approval.", url: "./", tag: "hearth-test" })));
+      const ok = r.every((c) => c >= 200 && c < 300);
+      return this.send(s, ok ? 200 : 502, { ok, statuses: r });
+    }
+    return this.send(s, 404, { error: "not found" });
+  }
+
   /**
    * An image file referenced by the agent (file:// uri, absolute or session-relative path). Only image types, only
    * inside the session's folder (symlinks resolved), content checked by magic bytes, size-capped. Served sandboxed so
@@ -364,7 +470,13 @@ export class Hearth {
     for (const e of buffered) { const ent = (e as { entry?: { seq: number } }).entry; if (!ent || ent.seq > last) send(e); }
 
     const ping = setInterval(() => { if (ws.readyState === ws.OPEN) ws.ping(); }, 25000);
-    ws.on("close", () => { clearInterval(ping); l.listeners.delete(listener); });
+    const sid = l.meta.id;
+    const setVisible = (v: boolean) => {
+      let set = this.viewers.get(sid);
+      if (v) { if (!set) this.viewers.set(sid, set = new Set()); set.add(ws); }
+      else if (set) { set.delete(ws); if (!set.size) this.viewers.delete(sid); }
+    };
+    ws.on("close", () => { clearInterval(ping); l.listeners.delete(listener); setVisible(false); });
     ws.on("message", async (raw) => {
       let msg: { type?: string; content?: unknown; id?: string; optionId?: string | null; text?: string; modeId?: string; configId?: string; value?: unknown; before?: unknown; to?: unknown };
       try { msg = JSON.parse(String(raw)); } catch { return; }
@@ -388,6 +500,7 @@ export class Hearth {
           if (o) await l.setOption(o.id, msg.modeId); else if (l.conn) await l.conn.setSessionMode({ sessionId: l.meta.agentSessionId!, modeId: msg.modeId });
         }
         else if (msg.type === "resume") await l.ensureRunning();
+        else if (msg.type === "visibility") setVisible((msg as { visible?: unknown }).visible === true);
         else if (msg.type === "history" && Number.isInteger(msg.before) && (msg.before as number) > 0) {
           const pg = this.store.readPage(l.meta, { before: msg.before as number, turns: HISTORY_TURNS });
           send({ type: "history", before: msg.before, items: dedupeFanout(pg.items), hasMore: pg.hasMore });

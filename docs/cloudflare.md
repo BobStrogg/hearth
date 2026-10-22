@@ -34,3 +34,11 @@ teams). Replace `example.com`, the team name and emails with your own.
 Tips:
 - Require a passkey or hardware key in the Access policy, because agents can run commands as you.
 - Keep sessions short (for example 12h). The Hearth password unlock adds a second factor tied to the machine.
+
+## Files and notifications behind Access
+
+- The file browser uploads in 8 MB requests, well under the 100 MB request-body limit of Cloudflare's free plan, so
+  large files work; downloads are streamed.
+- Notifications use the browser's push service, so they arrive even when the Access session has expired. Tapping one
+  opens Hearth, which may ask you to sign in again first. The service worker (`/sw.js`) is fetched through Access like
+  any other page.
