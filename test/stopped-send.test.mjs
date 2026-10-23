@@ -115,10 +115,13 @@ test("browser: 'Starting the agent…' while it starts; a send while disconnecte
     assert.equal(await page.$eval("#status", (x) => x.textContent), "starting");
     await page.waitForFunction(() => /Hello world!/.test(document.querySelector(".log").innerText) && !document.querySelector(".note.starting"), { timeout: 10000 });
     // disconnected: the send isn't lost
+    // (offline emulation keeps the page from reconnecting before the send, which a fast runner otherwise does)
+    await page.setOfflineMode(true);
     for (const c of h.wss.clients) c.terminate();
-    await sleep(50);
+    await sleep(200);
     await page.type(".composer textarea", "sent while offline"); await page.click(".composer button.primary");
     await page.waitForFunction(() => /Reconnecting/.test(document.querySelector(".log").innerText), { timeout: 10000 });
+    await page.setOfflineMode(false);
     for (let i = 0; i < 200 && prompts(id).at(-1) !== "sent while offline"; i++) await sleep(50);
     assert.equal(prompts(id).at(-1), "sent while offline");
     assert.equal(prompts(id).filter((t) => t === "sent while offline").length, 1, "sent once");
