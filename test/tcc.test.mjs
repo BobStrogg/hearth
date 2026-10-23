@@ -23,6 +23,8 @@ before(async () => {
   const port = 20000 + Math.floor(Math.random() * 20000);
   h = new Hearth(configFromEnv({ HEARTH_PORT: String(port), HEARTH_DATA_DIR: data, HEARTH_ROOTS: root, HEARTH_AGENTS_FILE: join(data, "agents.json"), HEARTH_IDENTITY: "single:me", HEARTH_PASSWORD: "off", HEARTH_QUEUE_CHECK_MS: "100" }));
   await h.listen(); base = `http://127.0.0.1:${port}`;
+  // Let the automatic post-start folder check (1 s after listen here) run now, so it never shares a check with a test below.
+  await new Promise((r) => setTimeout(r, 1300));
 });
 after(async () => { LiveSession.folderProbe = PROBE; LiveSession.FOLDER_CHECK_MS = CHECK; await h.close(); rmSync(root, { recursive: true, force: true }); });
 let n = 0;
@@ -55,6 +57,19 @@ test("a folder macOS denies (EPERM): says so without starting the agent", async 
   try {
     await assert.rejects(l.ensureRunning(), /the session folder .* can't be opened \(EPERM\), so the agent wasn't started/);
     assert.equal(sys(id, "agent_start_failed").at(-1).folderBlocked, "EPERM");
+  } finally { LiveSession.folderProbe = PROBE; }
+});
+
+test("stopped while its folder is being checked: no agent is started afterwards (nothing outlives Hearth's close)", async () => {
+  const { id, l } = await stopped();
+  let open; LiveSession.folderProbe = () => new Promise((r) => { open = r; });
+  try {
+    const exits = sys(id, "agent_exit").length;
+    const p = l.ensureRunning(); p.catch(() => {});
+    await new Promise((r) => setTimeout(r, 50));
+    await l.shutdown(); open();
+    await assert.rejects(p, /stopped before the agent started/);
+    assert.equal(l.child, undefined); assert.equal(sys(id, "agent_exit").length, exits, "no agent was spawned");
   } finally { LiveSession.folderProbe = PROBE; }
 });
 

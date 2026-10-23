@@ -341,7 +341,7 @@ export class LiveSession {
       const why = String((e as Error)?.message ?? e);
       // An exit is already in the transcript (with its output); anything else (a timeout, a missing command, an
       // error answer such as "not logged in") is kept there too, so it is still visible after a reload.
-      if (!/^agent exited/.test(why)) {
+      if (!/^agent exited|^stopped before the agent started/.test(why)) {
         this.quickFails++;
         this.lastFailLine = why.slice(0, 300);
         const t = e instanceof StartTimeout ? e : undefined;
@@ -368,7 +368,10 @@ export class LiveSession {
   private async start(skipLoad = false): Promise<void> {
     // Before the agent: an agent started in a folder macOS is holding behind a privacy prompt waits silently until
     // Hearth's start-up limit. Checking first says why within seconds (and makes macOS show the prompt for Hearth).
+    const gen = this.shutdownGen;
     await this.checkFolder(this.meta.cwd).catch((e) => { if (e instanceof FolderBlocked) throw e; });
+    // Stopped (Hearth closing, session ended) while the folder was being checked: no agent may appear after that.
+    if (gen !== this.shutdownGen || this.meta.state === "exited") throw new Error("stopped before the agent started");
     const child = spawn(this.agent.command, this.agent.args, {
       cwd: this.meta.cwd, stdio: ["pipe", "pipe", "pipe"], detached: true,
       env: { ...process.env, PATH: searchPath(), ...this.agent.env }, ...winShell(),
@@ -557,7 +560,10 @@ export class LiveSession {
   }
 
   /** Daemon shutdown: stop the agent but keep the session resumable. */
+  /** Bumped by shutdown(): a start still checking its folder then gives up instead of spawning an agent afterwards. */
+  private shutdownGen = 0;
   async shutdown() {
+    this.shutdownGen++;
     const c = this.child; if (!c) return;
     this.intendedKills.add(c);
     try { process.kill(-c.pid!, "SIGTERM"); } catch { c.kill("SIGTERM"); }
