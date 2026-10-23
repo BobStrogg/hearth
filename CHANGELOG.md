@@ -1,7 +1,12 @@
 # Changelog
 
-## 0.5.12
-- Released instead of 0.5.11 (the v0.5.11 tag has no release: its linux-arm64 build hung in the tests). Same changes as
+## 0.5.13
+- Released instead of 0.5.12 (the v0.5.12 tag has no release: the macOS Intel release build's tests timed out). Same
+  changes as 0.5.12 and 0.5.11 below. Test-only fix: the start-up timeout tests give the mock agent 4 s instead of 1 s,
+  so a slow CI runner's normal start isn't taken for a hang. CI now also tests on macOS Intel.
+
+## 0.5.12 (not released)
+- Not released (see 0.5.13). Same changes as
   0.5.11 below, plus: an agent is never started after its session was stopped while the folder check ran (when Hearth
   shut down at that moment, the agent could outlive it). CI now also tests on linux-arm64.
 

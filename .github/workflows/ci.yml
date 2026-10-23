@@ -12,7 +12,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]   # every OS the release builds on (the arm release build is the slowest)
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, macos-15-intel]   # every OS the release builds on (the arm and Intel release builds are the slowest)
         node: [22.23.4, 24.22.1]   # oldest patched release of each supported LTS line
     runs-on: ${{ matrix.os }}
     steps:
