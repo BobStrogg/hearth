@@ -138,12 +138,24 @@ jobs:
       - name: Bump Homebrew tap
         continue-on-error: true
         env:
+          # Write-access deploy key on <owner>/homebrew-hearth only (preferred), or a token that can push there.
+          TAP_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
-          if [ -z "${HOMEBREW_TAP_TOKEN:-}" ]; then echo "HOMEBREW_TAP_TOKEN not set: skipping tap bump"; exit 0; fi
           VERSION=${GITHUB_REF_NAME#v}
           SHA=$(awk '/hearth-acp-'"${VERSION}"'\.tgz/{print $1}' dist-rel/SHA256SUMS)
-          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${GITHUB_REPOSITORY_OWNER}/homebrew-hearth.git" tap
+          [ -n "$SHA" ] || { echo "no sha256 for hearth-acp-${VERSION}.tgz in SHA256SUMS"; exit 1; }
+          if [ -n "${TAP_KEY:-}" ]; then
+            install -d -m 700 ~/.ssh && printf '%s\n' "$TAP_KEY" > ~/.ssh/tap && chmod 600 ~/.ssh/tap
+            # github.com's published ed25519 host key (https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints)
+            echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" > ~/.ssh/known_hosts
+            export GIT_SSH_COMMAND="ssh -i ~/.ssh/tap -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
+            git clone "git@github.com:${GITHUB_REPOSITORY_OWNER}/homebrew-hearth.git" tap
+          elif [ -n "${HOMEBREW_TAP_TOKEN:-}" ]; then
+            git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${GITHUB_REPOSITORY_OWNER}/homebrew-hearth.git" tap
+          else
+            echo "No HOMEBREW_TAP_DEPLOY_KEY or HOMEBREW_TAP_TOKEN: skipping tap bump"; exit 0
+          fi
           cat > tap/Formula/hearth.rb <<RB
           class Hearth < Formula
             desc "Web UI for ACP coding agents"
