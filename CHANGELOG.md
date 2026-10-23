@@ -1,6 +1,11 @@
 # Changelog
 
-## 0.5.11
+## 0.5.12
+- Released instead of 0.5.11 (the v0.5.11 tag has no release: its linux-arm64 build hung in the tests). Same changes as
+  0.5.11 below, plus: an agent is never started after its session was stopped while the folder check ran (when Hearth
+  shut down at that moment, the agent could outlive it). CI now also tests on linux-arm64.
+
+## 0.5.11 (not released)
 - macOS folder permissions (Documents, Desktop, Downloads…) no longer reset with every Node.js or Hearth update. macOS
   gives them to the program launchd starts, identified by its path and signature, and Homebrew's node and the hearth
   binary change both on every update; until someone clicked Allow on the Mac's screen, agents started in such a folder
