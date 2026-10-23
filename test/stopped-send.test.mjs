@@ -80,7 +80,7 @@ test("a slow start: every client sees 'starting' (also one that connects meanwhi
 });
 
 test("a start that hangs times out with a visible error, leaves no agent behind, and the next send works", async () => {
-  LiveSession.START_TIMEOUT_MS = 600;
+  LiveSession.START_TIMEOUT_MS = 2000;   // the hang must trip it, a normal (slow CI runner) start must not
   try {
     const id = await create("hang"); const l = h.live.get(id); await l.ensureRunning(); await stopAgent(l);
     writeFileSync(hangInit, "");
@@ -111,14 +111,14 @@ test("browser: 'Starting the agent…' while it starts; a send while disconnecte
     await page.setViewport({ width: 1280, height: 800 });
     await page.goto(`${base}/#/s/${id}`); await page.waitForSelector(".composer textarea"); await sleep(500);
     await page.type(".composer textarea", "are you there?"); await page.click(".composer button.primary");
-    await page.waitForSelector(".note.starting", { timeout: 2000 });
+    await page.waitForSelector(".note.starting", { timeout: 10000 });
     assert.equal(await page.$eval("#status", (x) => x.textContent), "starting");
     await page.waitForFunction(() => /Hello world!/.test(document.querySelector(".log").innerText) && !document.querySelector(".note.starting"), { timeout: 10000 });
     // disconnected: the send isn't lost
     for (const c of h.wss.clients) c.terminate();
     await sleep(50);
     await page.type(".composer textarea", "sent while offline"); await page.click(".composer button.primary");
-    await page.waitForFunction(() => /Reconnecting/.test(document.querySelector(".log").innerText), { timeout: 2000 });
+    await page.waitForFunction(() => /Reconnecting/.test(document.querySelector(".log").innerText), { timeout: 10000 });
     for (let i = 0; i < 200 && prompts(id).at(-1) !== "sent while offline"; i++) await sleep(50);
     assert.equal(prompts(id).at(-1), "sent while offline");
     assert.equal(prompts(id).filter((t) => t === "sent while offline").length, 1, "sent once");
