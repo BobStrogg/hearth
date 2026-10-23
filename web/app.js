@@ -501,6 +501,7 @@ class Chat {
     else if (m.noOutput) kids.push(h("div", { class: "adtail adnone" }, `No output from the agent${m.startedAt ? ` since it started at ${localTime(m.startedAt)}` : ""}${m.pid ? ` (pid ${m.pid})` : ""}.`));
     kids.push(h("div", { class: "adhint" }, m.gaveUp
       ? `It failed right after starting ${m.fails} times in a row, so Hearth stopped restarting it by itself (queued prompts wait). The output above usually says why: a login, a missing command, or a Node version problem. Fix it on the computer, then send again or press Resume.`
+      : m.folderBlocked ? "The agent wasn't started, so nothing is stuck. Once the folder opens, send again."
       : m.timeout ? `Hearth stopped it after waiting. ${m.noOutput ? "An agent that starts but says nothing is usually waiting for something on the computer: a sign-in, an update, a macOS permission or keychain prompt, or the network. Running its command in Terminal shows what it is waiting for." : "Its output above may say what it is waiting for."} Send a message to try again.`
       : failed ? "Send a message to try again." : "Send a message to restart it."));
     card.replaceChildren(...kids);

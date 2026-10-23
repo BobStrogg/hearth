@@ -10,10 +10,11 @@ import { listExternal } from "./importer.js";
 import { installInfo, isSea } from "./install-info.js";
 import { dataDir } from "./platform.js";
 import { AgentPids } from "./orphans.js";
+import { permissionSummary } from "./privacy.js";
 import { pidFile } from "./service.js";
 import { cmpVer, latestRelease, plan, type Release, spawnUpdater } from "./update.js";
 import { VERSION } from "./version.js";
-import { LiveSession, within } from "./session.js";
+import { checkFolder, LiveSession, within } from "./session.js";
 import { Files, FilesError, readError } from "./files.js";
 import { DEFAULT_PUSH_HOSTS, endpointOk, Push, replyTail, snippet, validSubscription } from "./push.js";
 const HISTORY_TURNS = 8;
@@ -154,6 +155,9 @@ export class Hearth {
       // Idle check: any session whose agent is free and has queued prompts runs the next one (also right after startup).
       this.queueTimer = setInterval(() => this.kickQueues(), this.cfg.queueCheckMs); this.queueTimer.unref();
       setTimeout(() => this.kickQueues(), Math.min(1000, this.cfg.queueCheckMs)).unref();
+      // Right after a (re)start, e.g. after a Node.js or Hearth update: open the folders of recent sessions, so a macOS
+      // privacy prompt shows up now (and /healthz says "needs permission") rather than on the next send.
+      setTimeout(() => { void this.checkRecentFolders(); }, Math.min(3000, this.cfg.queueCheckMs * 10)).unref();
       res((this.server.address() as { port: number }).port);
     }));
   }
@@ -165,6 +169,14 @@ export class Hearth {
   }
   private queueTimer?: NodeJS.Timeout;
   kickQueues() { for (const l of this.live.values()) { try { l.kick(); } catch { /* next time */ } } }
+  /** The folders of up to 5 sessions used in the last 14 days (not ended), checked once at startup. */
+  async checkRecentFolders(days = 14, max = 5): Promise<string[]> {
+    const since = new Date(Date.now() - days * 86400_000).toISOString();
+    const dirs = [...new Set(this.store.all().filter((m) => m.state !== "exited" && (m.lastActivity ?? "") >= since)
+      .sort((a, b) => (b.lastActivity ?? "").localeCompare(a.lastActivity ?? "")).map((m) => m.cwd))].slice(0, max);
+    await Promise.all(dirs.map((d) => checkFolder(d, "startup").catch(() => {})));
+    return dirs;
+  }
   /** True while any agent is mid-turn: restarting then would cut it off. */
   busy() { return [...this.live.values()].some((l) => l.turnActive || l.meta.state === "running" || l.pending.size > 0); }
   private async versionInfo(check: boolean) {
@@ -261,7 +273,7 @@ export class Hearth {
   private async http(q: IncomingMessage, s: ServerResponse) {
     if (!this.auth.hostOk(q)) return this.send(s, 421, { error: "host not allowed" });
     const url = new URL(q.url ?? "/", "http://x");
-    if (url.pathname === "/healthz") return this.send(s, 200, { ok: true, version: VERSION });
+    if (url.pathname === "/healthz") return this.send(s, 200, { ok: true, version: VERSION, permission: permissionSummary() });
     if (!url.pathname.startsWith("/api/")) return this.static(url.pathname, s);
 
     const who = await this.auth.identify(q);

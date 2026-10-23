@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.5.11
+- macOS folder permissions (Documents, Desktop, Downloads…) no longer reset with every Node.js or Hearth update. macOS
+  gives them to the program launchd starts, identified by its path and signature, and Homebrew's node and the hearth
+  binary change both on every update; until someone clicked Allow on the Mac's screen, agents started in such a folder
+  just waited. `hearth service install` now builds a tiny launcher once (`~/.hearth/bin/hearth-launch`, needs the
+  Xcode Command Line Tools) that starts Hearth and stays its parent, and never rebuilds it unless its source changes.
+  Allow it once (or give it Full Disk Access) and that lasts. `hearth doctor` says whether the service uses it.
+  `HEARTH_NO_LAUNCHER=1` runs Hearth directly as before.
+- Before starting an agent, Hearth checks that the session folder opens (5 s limit, off the main thread). A folder
+  macOS holds behind a privacy prompt used to make the agent hang silently until the 120 s start-up limit. Now the note
+  says so within seconds, names the program to allow (the launcher, or node), and starts no agent. A check stuck behind
+  the prompt is shared, not repeated, and clears by itself once someone clicks Allow.
+- Right after starting (for example after an update), Hearth opens the folders of up to 5 recent sessions, so a macOS
+  prompt appears then rather than on the next send.
+- `/healthz` reports `permission: { needed, folders, since, launcher }` (folder names only, no paths) when a session
+  folder or a Files request is stuck or denied, so a dashboard can show "needs permission".
+
 ## 0.5.10
 - An agent that starts but never answers (it waits on a sign-in, an update, a macOS permission or keychain prompt, or
   the network): the "Couldn't start the agent" note now shows what that process printed while Hearth waited, or says it

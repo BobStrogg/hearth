@@ -5,9 +5,10 @@ import { dirname, join } from "node:path";
 import { searchPath, which } from "./agents.js";
 import { dataDir, envFilePath } from "./platform.js";
 import { selfCommand } from "./install-info.js";
+import { ensureLauncher } from "./launcher.js";
 
 export interface ServiceStatus { manager: string; installed: boolean; running: boolean; pid?: number; detail?: string; file?: string }
-export interface InstallOpts { system?: boolean; user?: string }
+export interface InstallOpts { system?: boolean; user?: string; ensureLauncher?: () => { path: string | null; built: boolean; note?: string } }
 export interface ServiceManager {
   readonly name: string;
   available(): boolean;
@@ -45,7 +46,12 @@ export class Launchd implements ServiceManager {
     const user = o.user ?? process.env.SUDO_USER ?? userInfo().username;
     if (this.system && process.getuid?.() !== 0) throw new Error("--system needs root: run it with sudo");
     const env = serviceEnv(this.name, homedir());
-    const argv = [...selfCommand(), "serve"];
+    // Per-user LaunchAgent: run through the stable launcher, so macOS folder permissions survive Node.js and Hearth
+    // updates (see launcher.ts). HEARTH_NO_LAUNCHER=1 runs Hearth directly.
+    const l = !this.system && process.env.HEARTH_NO_LAUNCHER !== "1" ? (o.ensureLauncher ?? ensureLauncher)() : { path: null, built: false };
+    if (l.path) notes.push(`Runs through ${l.path}${l.built ? " (just built)" : ""}: macOS folder permissions given to it last across Node.js and Hearth updates. If macOS asks about "hearth-launch", click Allow once.`);
+    else if (l.note) notes.push(`Note: ${l.note}.`);
+    const argv = [...(l.path ? [l.path] : []), ...selfCommand(), "serve"];
     const body = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>

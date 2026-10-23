@@ -1,4 +1,5 @@
 import { createWriteStream, realpathSync, type Dirent, type Stats } from "node:fs";
+import { noteBlocked, noteOpen } from "./privacy.js";
 import * as fsp from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -78,17 +79,18 @@ export class Files {
   }
 
   /** Run one file-system call with the deadline and stuck accounting. */
-  private op<T>(p: () => Promise<T>): Promise<T> {
+  private op<T>(p: () => Promise<T>, path?: string): Promise<T> {
     if (this.stuck >= this.maxStuck) return Promise.reject(new FilesError(503, `waiting on ${this.stuck} earlier file requests that are still stuck; ${SLOW_MSG}`));
     const run = p();
     return new Promise<T>((res, rej) => {
       let late = false;
-      const t = setTimeout(() => { late = true; this.stuck++; const fe = new FilesError(504, SLOW_MSG); fe.log = true; rej(fe); }, this.timeoutMs);
-      run.then((v) => { clearTimeout(t); if (late) { this.stuck--; if (v && typeof (v as { close?: unknown }).close === "function") void (v as unknown as FileHandle).close().catch(() => {}); } else res(v); },
+      // A stuck path is reported as needing permission (privacy.ts) until an access to it finishes.
+      const t = setTimeout(() => { late = true; this.stuck++; if (path) noteBlocked(path, "TIMEOUT", "files"); const fe = new FilesError(504, SLOW_MSG); fe.log = true; rej(fe); }, this.timeoutMs);
+      run.then((v) => { clearTimeout(t); if (path) noteOpen(path); if (late) { this.stuck--; if (v && typeof (v as { close?: unknown }).close === "function") void (v as unknown as FileHandle).close().catch(() => {}); } else res(v); },
         (e) => { clearTimeout(t); if (late) this.stuck--; else rej(e); });
     });
   }
-  private stat(p: string) { return this.op(() => this.fs.stat(p)); }
+  private stat(p: string) { return this.op(() => this.fs.stat(p), p); }
   private statOrNull(p: string) { return this.stat(p).catch((e) => { if ((e as NodeJS.ErrnoException).code === "ENOENT") return null; throw e; }); }
 
   /** Resolve a root-relative path; throws 403 if it (or what it links to) leaves the root. `mustExist` false allows a new leaf. */

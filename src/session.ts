@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { appendFileSync, existsSync, realpathSync, renameSync, statSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, opendir, readFile, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { Readable, Writable } from "node:stream";
 import * as acp from "./acp.js";
@@ -10,6 +10,7 @@ import { absorb, applyUpdate, MODE_ID, MODEL_ID, normalize, setLocal, valid, typ
 import { VERSION } from "./version.js";
 import { PromptQueue, QueueError, type QueueView } from "./queue.js";
 import type { AgentPids } from "./orphans.js";
+import { noteBlocked, noteOpen, responsibleProgram } from "./privacy.js";
 
 export type LiveEvent =
   | { type: "entry"; entry: TranscriptEntry }
@@ -26,6 +27,42 @@ export type LiveEvent =
 /** A start-up step the agent never answered. Carries what this process (and only this one) wrote to stderr meanwhile. */
 class StartTimeout extends Error {
   constructor(message: string, readonly stderrTail: string | undefined, readonly noOutput: boolean, readonly pid: number | undefined, readonly startedAt: string) { super(message); }
+}
+/**
+ * The session folder couldn't be opened, so the agent wasn't started. On a Mac this is usually privacy protection
+ * (Desktop, Documents, Downloads, iCloud…): macOS ties the permission to the exact program that runs Hearth (node or
+ * hearth), so after Node.js or Hearth is updated it asks again, and until someone answers on the Mac's screen every
+ * access from Hearth and from the agents it starts just waits. An agent started there hangs before it says anything.
+ */
+export class FolderBlocked extends Error { constructor(message: string, readonly code: string) { super(message); } }
+/** One check per folder at a time: a check stuck behind a privacy prompt is shared, not repeated (each holds a libuv thread). */
+const folderChecks = new Map<string, Promise<void>>();
+export function folderHelp(dir: string, code: string, platform = process.platform, exe = responsibleProgram()): string {
+  const mac = platform === "darwin";
+  const fix = mac ? ` On the Mac, look for a "would like to access files in…" prompt and click Allow, or in System Settings > Privacy & Security > Files and Folders (or Full Disk Access) allow ${exe}. macOS asks again after Node.js or Hearth is updated, because the permission belongs to that exact program. Then send again.` : "";
+  if (code === "TIMEOUT") return `the session folder ${dir} didn't open within ${Math.round(LiveSession.FOLDER_CHECK_MS / 1000)} s, so the agent wasn't started.${mac ? " macOS is probably waiting for permission." + fix : " A network or cloud folder may be slow or offline."}`;
+  if (code === "EPERM" || code === "EACCES") return `the session folder ${dir} can't be opened (${code}), so the agent wasn't started.${mac ? " macOS is blocking Hearth from it." + fix : " The account Hearth runs as has no access to it."}`;
+  return `the session folder ${dir} can't be opened (${code}), so the agent wasn't started.`;
+}
+/**
+ * Can `dir` be opened? Off the main thread (a libuv thread), with LiveSession.FOLDER_CHECK_MS. A blocked folder is
+ * recorded (privacy.ts) and cleared as soon as an access succeeds, including the stuck check itself finishing once
+ * someone clicks Allow. Rejects with FolderBlocked (timeout, EPERM, EACCES) or the original error (e.g. ENOENT).
+ */
+export function checkFolder(dir: string, via: "agent" | "startup" = "agent"): Promise<void> {
+  let p = folderChecks.get(dir);
+  if (!p) {
+    const run: Promise<void> = LiveSession.folderProbe(dir).then(() => noteOpen(dir)).finally(() => { if (folderChecks.get(dir) === run) folderChecks.delete(dir); });
+    folderChecks.set(dir, run); run.catch(() => {}); p = run;
+  }
+  let t: NodeJS.Timeout | undefined;
+  const late = new Promise<never>((_, rej) => { t = setTimeout(() => { noteBlocked(dir, "TIMEOUT", via); rej(new FolderBlocked(folderHelp(dir, "TIMEOUT"), "TIMEOUT")); }, LiveSession.FOLDER_CHECK_MS); t.unref?.(); });
+  return Promise.race([p.catch((e: NodeJS.ErrnoException) => {
+    const code = e?.code ?? "error";
+    if (code === "ENOENT" || code === "ENOTDIR") throw e;
+    if (code === "EPERM" || code === "EACCES") noteBlocked(dir, code, via);
+    throw new FolderBlocked(folderHelp(dir, code), code);
+  }), late]).finally(() => clearTimeout(t));
 }
 /** Agent stderr log cap: past this the file is moved to agent-stderr.log.1 and a fresh one started (never silently frozen). */
 export const STDERR_LOG_MAX = 2_000_000;
@@ -310,7 +347,7 @@ export class LiveSession {
         const t = e instanceof StartTimeout ? e : undefined;
         // A timeout carries this process's own stderr (or that there was none): never an earlier run's.
         this.log("sys", { event: "agent_start_failed", error: why.slice(0, 2000), fails: this.quickFails, gaveUp: this.crashLooping || undefined,
-          timeout: t ? true : undefined, stderrTail: t?.stderrTail, noOutput: t?.noOutput || undefined, pid: t?.pid, startedAt: t?.startedAt });
+          timeout: t ? true : undefined, folderBlocked: e instanceof FolderBlocked ? e.code : undefined, stderrTail: t?.stderrTail, noOutput: t?.noOutput || undefined, pid: t?.pid, startedAt: t?.startedAt });
       }
       throw new Error(`couldn't start the agent: ${why}`);
     }).then(() => {
@@ -322,7 +359,16 @@ export class LiveSession {
     return this.starting;
   }
 
+  /** How long the session folder gets to open before the agent is started (a privacy prompt makes it wait forever). */
+  static FOLDER_CHECK_MS = 5_000;
+  /** Open the folder and read one entry, off the main thread. Replaceable in tests. */
+  static folderProbe = async (dir: string) => { const d = await opendir(dir); try { await d.read(); } finally { await d.close().catch(() => {}); } };
+  private checkFolder(dir: string, via: "agent" | "startup" = "agent"): Promise<void> { return checkFolder(dir, via); }
+
   private async start(skipLoad = false): Promise<void> {
+    // Before the agent: an agent started in a folder macOS is holding behind a privacy prompt waits silently until
+    // Hearth's start-up limit. Checking first says why within seconds (and makes macOS show the prompt for Hearth).
+    await this.checkFolder(this.meta.cwd).catch((e) => { if (e instanceof FolderBlocked) throw e; });
     const child = spawn(this.agent.command, this.agent.args, {
       cwd: this.meta.cwd, stdio: ["pipe", "pipe", "pipe"], detached: true,
       env: { ...process.env, PATH: searchPath(), ...this.agent.env }, ...winShell(),

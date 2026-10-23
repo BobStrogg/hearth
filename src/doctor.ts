@@ -80,6 +80,12 @@ export async function doctor(opts: { online?: boolean } = {}): Promise<Check[]> 
     if (!st.installed) add("warn", `Not installed as a ${st.manager} service`, "`hearth service install` starts it at login and restarts it if it stops.");
     else add(st.running ? "ok" : "fail", `${st.manager} service ${st.running ? `running${st.pid ? ` (pid ${st.pid})` : ""}` : "installed but not running"}`, st.running ? st.detail : "`hearth service start`, then `hearth service logs`.");
     if (st.detail) add("warn", st.detail);
+    // macOS: through the stable launcher, folder permissions survive Node.js and Hearth updates (see launcher.ts).
+    if (process.platform === "darwin" && st.installed && st.file && /LaunchAgents/.test(st.file)) {
+      let pl = ""; try { pl = readFileSync(st.file, "utf8"); } catch { /* unreadable */ }
+      if (/hearth-launch<\/string>/.test(pl)) add("ok", "Runs through hearth-launch: macOS folder permissions last across Node.js and Hearth updates");
+      else add("warn", "Runs Hearth directly: macOS may ask for folder permission (Documents, Desktop…) again after each Node.js or Hearth update, and agents wait until someone clicks Allow", "`hearth service install` (needs the Xcode Command Line Tools: `xcode-select --install`)");
+    }
   }
 
   // updates

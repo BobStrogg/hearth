@@ -46,8 +46,10 @@ test("launchd: plist content (LaunchAgent), migration note, status", { skip: pro
   // Existing run.sh-style agent: install should mention the migration.
   writeFileSync(join(home, "Library/LaunchAgents", `${LABEL}.plist`), "<plist><string>run.sh</string></plist>");
   const s = new Launchd(false); assert.ok(s.available());
-  const notes = s.install(); assert.match(notes.join("\n"), /Migrated the old run\.sh/);
+  const notes = s.install({ ensureLauncher: () => ({ path: "/fake/hearth-launch", built: true }) }); assert.match(notes.join("\n"), /Migrated the old run\.sh/);
+  assert.match(notes.join("\n"), /Runs through \/fake\/hearth-launch \(just built\)/);
   const pl = readFileSync(join(home, "Library/LaunchAgents", `${LABEL}.plist`), "utf8");
+  assert.match(pl, /<key>ProgramArguments<\/key><array><string>\/fake\/hearth-launch<\/string><string>[^<]*node[^<]*<\/string>/, "launchd starts the stable launcher, which starts Hearth");
   assert.match(pl, /io\.github\.hearth/); assert.match(pl, /KeepAlive/); assert.doesNotMatch(pl, /run\.sh/);
   assert.match(pl, /HEARTH_SERVICE/); assert.match(pl, /ProgramArguments/);
   const st = s.status(); assert.ok(st.installed && st.running);
