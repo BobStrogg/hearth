@@ -478,7 +478,7 @@ class Chat {
    * The agent stopped (or couldn't start): what it said on stderr and how it exited, in one card. Repeated failures with
    * nothing but notes in between (a respawn that died again) update that card instead of stacking "Agent stopped" lines.
    */
-  agentDown(m) {
+  agentDown(m, ts) {
     const failed = m.event === "agent_start_failed" || (!m.intended && (m.fails || (m.code != null && m.code !== 0) || (m.signal && m.signal !== "SIGTERM")));
     const how = m.event === "agent_start_failed" ? "" : m.signal ? ` (signal ${m.signal})` : m.code != null ? ` (exit code ${m.code})` : "";
     const when = m.phase === "starting" ? " while starting" : m.phase === "prompt" ? " while answering" : "";
@@ -492,10 +492,16 @@ class Chat {
     card.kind = kind;
     card.classList.toggle("err", !!failed);
     const title = m.event === "agent_start_failed" ? `Couldn't start the agent: ${m.error}` : `Agent stopped${when}${how}.`;
-    const kids = [h("div", { class: "adtitle" }, title, card.count > 1 ? h("span", { class: "adcount", title: "times in a row" }, ` ×${card.count}`) : null)];
-    if (m.stderrTail) kids.push(h("pre", { class: "adtail", "aria-label": "The agent's last output" }, m.stderrTail));
+    const at = localTime(ts);
+    const kids = [h("div", { class: "adtitle" }, title, card.count > 1 ? h("span", { class: "adcount", title: "times in a row" }, ` ×${card.count}`) : null,
+      at ? h("span", { class: "adwhen", title: ts }, ` · ${at}`) : null)];
+    // Only this run's output: an exit carries its own process's stderr, a timeout carries what the new process printed
+    // while Hearth waited (or says it printed nothing). Timestamps in the agent's log lines are shown in local time.
+    if (m.stderrTail) kids.push(h("pre", { class: "adtail", "aria-label": "The agent's last output", title: "This run's output (times in your local time)" }, localizeStamps(m.stderrTail)));
+    else if (m.noOutput) kids.push(h("div", { class: "adtail adnone" }, `No output from the agent${m.startedAt ? ` since it started at ${localTime(m.startedAt)}` : ""}${m.pid ? ` (pid ${m.pid})` : ""}.`));
     kids.push(h("div", { class: "adhint" }, m.gaveUp
       ? `It failed right after starting ${m.fails} times in a row, so Hearth stopped restarting it by itself (queued prompts wait). The output above usually says why: a login, a missing command, or a Node version problem. Fix it on the computer, then send again or press Resume.`
+      : m.timeout ? `Hearth stopped it after waiting. ${m.noOutput ? "An agent that starts but says nothing is usually waiting for something on the computer: a sign-in, an update, a macOS permission or keychain prompt, or the network. Running its command in Terminal shows what it is waiting for." : "Its output above may say what it is waiting for."} Send a message to try again.`
       : failed ? "Send a message to try again." : "Send a message to restart it."));
     card.replaceChildren(...kids);
     const pre = card.querySelector(".adtail"); if (pre) pre.scrollTop = pre.scrollHeight; // the last lines matter most
@@ -518,7 +524,7 @@ class Chat {
     } else if (e.dir === "in" && msg.method === "session/update") this.update(msg.params.update);
     else if (e.dir === "sys") {
       const ev = msg.event;
-      if (ev === "agent_exit" || ev === "agent_start_failed") this.agentDown(msg);
+      if (ev === "agent_exit" || ev === "agent_start_failed") this.agentDown(msg, e.ts);
       else if (ev === "context_reset") this.note("Agent restarted without its memory of the earlier conversation (it doesn't support session/load).");
       else if (ev === "session_loaded") this.note("Agent restarted and reloaded the conversation.");
       else if (ev === "session_resumed") this.note("Agent restarted and resumed the conversation.");
@@ -661,6 +667,20 @@ const IMG_MIME = { "image/png": 1, "image/jpeg": 1, "image/jpg": 1, "image/gif":
 const IMG_EXT = /\.(png|jpe?g|gif|webp|avif|svg)$/i;
 const DATA_IMG = /^data:image\/(png|jpeg|gif|webp|avif|svg\+xml);base64,[A-Za-z0-9+/=\s]+$/i;
 const baseName = (u) => String(u || "").split(/[?#]/)[0].split("/").pop() || "image";
+/** An ISO time as the viewer's local time with its zone ("9:09 AM CDT"; with the date when it isn't today). */
+function localTime(iso) {
+  const d = new Date(iso); if (!iso || isNaN(d)) return "";
+  const today = d.toDateString() === new Date().toDateString();
+  return d.toLocaleString([], { ...(today ? {} : { month: "short", day: "numeric" }), hour: "numeric", minute: "2-digit", timeZoneName: "short" });
+}
+/** UTC timestamps in agent log lines (2026-10-22T14:09:54.080463Z) shown as local time (9:09:54 AM). */
+function localizeStamps(text) {
+  return String(text).replace(/\b(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(\.\d+)?Z\b/g, (all, base) => {
+    const d = new Date(`${base}Z`); if (isNaN(d)) return all;
+    const today = d.toDateString() === new Date().toDateString();
+    return d.toLocaleString([], { ...(today ? {} : { month: "short", day: "numeric" }), hour: "numeric", minute: "2-digit", second: "2-digit" });
+  });
+}
 /** An ACP content block as an image: `image` (base64 data and/or uri), `resource_link` / embedded `resource` with an image mimeType. */
 function imageOf(c) {
   if (!c || typeof c !== "object") return null;

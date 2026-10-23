@@ -9,6 +9,7 @@ import { Auth, type AuthConfig, parseUserAliases } from "./auth.js";
 import { listExternal } from "./importer.js";
 import { installInfo, isSea } from "./install-info.js";
 import { dataDir } from "./platform.js";
+import { AgentPids } from "./orphans.js";
 import { pidFile } from "./service.js";
 import { cmpVer, latestRelease, plan, type Release, spawnUpdater } from "./update.js";
 import { VERSION } from "./version.js";
@@ -118,6 +119,8 @@ export class Hearth {
   private rel: { at: number; release?: Release; error?: string } = { at: 0 };
   private updating = 0; private pendingSince = 0; private autoTimer?: NodeJS.Timeout;
   files: Files | null = null; push: Push | null = null;
+  /** Agent process groups started by this Hearth (see orphans.ts). */
+  readonly agentPids: AgentPids;
   /** Sockets currently looking at a session (tab visible and focused): no push for that session while > 0. */
   private viewers = new Map<string, Set<WebSocket>>();
 
@@ -131,6 +134,9 @@ export class Hearth {
       const subject = cfg.pushSubject || cfg.allowedOrigins.find((o) => o.startsWith("https://")) || "https://github.com/BobStrogg/hearth";
       try { this.push = new Push(cfg.dataDir, (o) => dirname(this.store.userDir(o)), subject, cfg.pushHosts); } catch { this.push = null; }
     }
+    // Agents an earlier Hearth left running (it was killed before it could stop them): stop them, in the background.
+    this.agentPids = new AgentPids(join(cfg.dataDir, "agent-pids.json"));
+    void this.agentPids.reap().then((r) => { if (r.length) console.warn(`Stopped ${r.length} agent process group(s) left running by an earlier Hearth: ${r.join(", ")}`); }).catch(() => {});
     // Daemon restart: nothing is running any more.
     for (const m of this.store.all()) if (m.state === "running" || m.state === "idle") { m.state = "stopped"; this.store.save(m); }
     // Sessions with queued prompts left over from before the restart: load them so the idle check drains them.
@@ -209,7 +215,7 @@ export class Hearth {
     if (!l) {
       const a = this.agents.find((x) => x.id === m.agentId);
       if (!a) throw new Error(`unknown agent ${m.agentId}`);
-      l = new LiveSession(m, a, this.store);
+      l = new LiveSession(m, a, this.store, this.agentPids);
       this.live.set(m.id, l);
       this.notifyOn(l);
     }

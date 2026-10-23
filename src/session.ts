@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { appendFileSync, existsSync, realpathSync, statSync } from "node:fs";
+import { appendFileSync, existsSync, realpathSync, renameSync, statSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { Readable, Writable } from "node:stream";
@@ -9,6 +9,7 @@ import type { SessionMeta, Store, TranscriptEntry } from "./store.js";
 import { absorb, applyUpdate, MODE_ID, MODEL_ID, normalize, setLocal, valid, type RawSettings, type UiOption } from "./settings.js";
 import { VERSION } from "./version.js";
 import { PromptQueue, QueueError, type QueueView } from "./queue.js";
+import type { AgentPids } from "./orphans.js";
 
 export type LiveEvent =
   | { type: "entry"; entry: TranscriptEntry }
@@ -22,7 +23,17 @@ export type LiveEvent =
   | { type: "settings"; options: UiOption[] }
   | ({ type: "queue" } & QueueView);
 
-class StartTimeout extends Error {}
+/** A start-up step the agent never answered. Carries what this process (and only this one) wrote to stderr meanwhile. */
+class StartTimeout extends Error {
+  constructor(message: string, readonly stderrTail: string | undefined, readonly noOutput: boolean, readonly pid: number | undefined, readonly startedAt: string) { super(message); }
+}
+/** Agent stderr log cap: past this the file is moved to agent-stderr.log.1 and a fresh one started (never silently frozen). */
+export const STDERR_LOG_MAX = 2_000_000;
+/** A timestamp with the computer's own UTC offset (e.g. 2026-10-22T22:31:05-05:00), for lines people read in the log file. */
+export function localStamp(d = new Date()): string {
+  const off = -d.getTimezoneOffset(), sign = off >= 0 ? "+" : "-", a = Math.abs(off), p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}${sign}${p(Math.floor(a / 60))}:${p(a % 60)}`;
+}
 /** The last meaningful line an agent wrote to stderr (what to show in a one-line error). */
 const lastLine = (t: string) => t.split("\n").map((l) => l.trim()).filter(Boolean).at(-1)?.slice(0, 300) ?? "";
 interface Pending { params: acp.RequestPermissionRequest; resolve: (r: acp.RequestPermissionResponse) => void }
@@ -106,7 +117,7 @@ export class LiveSession {
   private userCancelled = false;
   private sendNowPending = false;
 
-  constructor(public meta: SessionMeta, private agent: AgentDef, private store: Store) {
+  constructor(public meta: SessionMeta, private agent: AgentDef, private store: Store, private pids?: AgentPids) {
     let file = "";
     try { file = join(store.dir(meta.owner, meta.id), "queue.json"); } catch { /* bad id: never persisted */ }
     this.queue = new PromptQueue(file, (v) => this.emit({ type: "queue", ...v }));
@@ -149,6 +160,8 @@ export class LiveSession {
     throw e;
   }
   private intendedKills = new WeakSet<ChildProcess>();
+  /** Agents Hearth stopped because their start failed or timed out (reported by the "couldn't start" note instead). */
+  private cleanupKills = new WeakSet<ChildProcess>();
 
   /** Delays before a queue paused by a failed prompt tries again by itself (then it waits for Resume). */
   static RETRY_MS = [15_000, 60_000, 300_000];
@@ -215,10 +228,15 @@ export class LiveSession {
   }
 
   /** Agent stderr goes to sessions/<id>/agent-stderr.log (capped) so failures are diagnosable. */
+  /**
+   * Each start writes a "--- started … ---" line first, so the newest run is easy to find and old output is never
+   * mistaken for it. A full log is rotated to agent-stderr.log.1 (it used to stop growing, which froze the file at
+   * an old run).
+   */
   private stderrLog(chunk: Buffer | string) {
     try {
       const p = join(this.store.dir(this.meta.owner, this.meta.id), "agent-stderr.log");
-      if (existsSync(p) && statSync(p).size > 2_000_000) return;
+      if (existsSync(p) && statSync(p).size > STDERR_LOG_MAX) renameSync(p, `${p}.1`);
       appendFileSync(p, chunk, { mode: 0o600 });
     } catch { /* ignore */ }
   }
@@ -279,7 +297,8 @@ export class LiveSession {
     this.starting ??= this.start().catch(async (e) => {
       // A start that failed or timed out must not leave a half-started agent behind: the next send starts afresh.
       const c = this.child;
-      if (c && c.exitCode === null) { this.recycling = true; try { await this.killChild(c); } catch { /* gone */ } finally { this.recycling = false; } }
+      // Hearth stops it here (SIGTERM, then SIGKILL): the "couldn't start" note below says so, so no separate exit card.
+      if (c && c.exitCode === null) { this.recycling = true; this.cleanupKills.add(c); try { await this.killChild(c); } catch { /* gone */ } finally { this.recycling = false; } }
       this.child = undefined; this.conn = undefined;
       if (this.meta.state !== "exited") this.setState("stopped");
       const why = String((e as Error)?.message ?? e);
@@ -288,7 +307,10 @@ export class LiveSession {
       if (!/^agent exited/.test(why)) {
         this.quickFails++;
         this.lastFailLine = why.slice(0, 300);
-        this.log("sys", { event: "agent_start_failed", error: why.slice(0, 2000), fails: this.quickFails, gaveUp: this.crashLooping || undefined });
+        const t = e instanceof StartTimeout ? e : undefined;
+        // A timeout carries this process's own stderr (or that there was none): never an earlier run's.
+        this.log("sys", { event: "agent_start_failed", error: why.slice(0, 2000), fails: this.quickFails, gaveUp: this.crashLooping || undefined,
+          timeout: t ? true : undefined, stderrTail: t?.stderrTail, noOutput: t?.noOutput || undefined, pid: t?.pid, startedAt: t?.startedAt });
       }
       throw new Error(`couldn't start the agent: ${why}`);
     }).then(() => {
@@ -307,8 +329,13 @@ export class LiveSession {
     });
     this.child = child;
     const spawnedAt = Date.now(); this.phase = "starting";
-    let tail = "";
-    child.stderr!.on("data", (d: Buffer) => { this.stderrLog(d); tail = (tail + d.toString()).slice(-2000); });
+    const startedAt = new Date(spawnedAt).toISOString();
+    this.pids?.add(child.pid, this.agent.command);
+    // Marks where this run's output starts in agent-stderr.log (local time with offset; the command name only, no args).
+    if (child.pid) this.stderrLog(`--- hearth ${VERSION}: started ${basename(this.agent.command)} (pid ${child.pid}) at ${localStamp(new Date(spawnedAt))} ---\n`);
+    let tail = "", stderrBytes = 0;
+    child.stderr!.on("data", (d: Buffer) => { this.stderrLog(d); stderrBytes += d.length; tail = (tail + d.toString()).slice(-4000); });
+    const tailLines = () => tail.replace(/\s+$/, "").split("\n").slice(-20).join("\n") || undefined;
     const exited = new Promise<never>((_, rej) => {
       child.once("error", (e) => rej(e));
       child.once("exit", (code, sig) => { const last = lastLine(tail); rej(new Error(`agent exited (${code ?? sig})${last ? `: ${last}` : ""}`)); });
@@ -317,10 +344,17 @@ export class LiveSession {
     const step = <T,>(p: Promise<T>, what: string): Promise<T> => {
       let t: NodeJS.Timeout | undefined;
       const ms = LiveSession.START_TIMEOUT_MS;
-      const late = new Promise<never>((_, rej) => { t = setTimeout(() => rej(new StartTimeout(`the agent didn't answer ${what} within ${Math.round(ms / 1000)} s`)), ms); t.unref?.(); });
+      const late = new Promise<never>((_, rej) => {
+        t = setTimeout(() => {
+          const quiet = stderrBytes === 0, last = lastLine(tail);
+          rej(new StartTimeout(`the agent didn't answer ${what} within ${Math.round(ms / 1000)} s${quiet ? " and printed nothing since it started" : last ? `; its last output: ${last}` : ""}`,
+            tailLines(), quiet, child.pid, startedAt));
+        }, ms); t.unref?.();
+      });
       return Promise.race([p, exited, late]).catch((e) => this.explain(e, child)).finally(() => clearTimeout(t));
     };
     child.once("exit", (code, signal) => {
+      this.pids?.remove(child.pid);
       // Was this a failure (it died by itself while starting, answering, or right after it was spawned)?
       const intended = this.intendedKills.has(child) || this.recycling || this.meta.state === "exited";
       const phase = this.phase;
@@ -328,8 +362,8 @@ export class LiveSession {
       this.lastExit = { child, code, signal, line: lastLine(tail) };
       if (quick) { this.quickFails++; this.lastFailLine = lastLine(tail) || `exit ${code ?? signal}`; }
       if (this.child === child) this.phase = "idle";
-      const stderrTail = tail.replace(/\s+$/, "").split("\n").slice(-20).join("\n") || undefined;
-      this.log("sys", { event: "agent_exit", code, signal, stderrTail, phase, intended: intended || undefined,
+      const stderrTail = tailLines();
+      if (!this.cleanupKills.has(child)) this.log("sys", { event: "agent_exit", code, signal, stderrTail, phase, intended: intended || undefined,
         fails: quick ? this.quickFails : undefined, gaveUp: quick && this.crashLooping ? true : undefined });
       for (const [id, p] of this.pending) { p.resolve({ outcome: { outcome: "cancelled" } }); this.emit({ type: "permission_resolved", id }); }
       this.pending.clear();

@@ -7,6 +7,22 @@ if (process.env.MOCK_DIE_AT_START && existsSyncM(process.env.MOCK_DIE_AT_START))
   process.stderr.write("Error: The module 'better_sqlite3.node' was compiled against a different Node.js version (NODE_MODULE_VERSION 141)\n");
   process.exit(1);
 }
+// MOCK_HANG_AT_START=<flag file>: while it exists, start but never answer (like an agent waiting on a sign-in, an
+// update, a keychain prompt or the network). MOCK_HANG_SAY: a line it prints to stderr first. MOCK_GRANDCHILD=<file>:
+// also start a child process (in the same process group) and write its pid there.
+if (process.env.MOCK_HANG_AT_START && existsSyncM(process.env.MOCK_HANG_AT_START)) {
+  if (process.env.MOCK_GRANDCHILD) {
+    const { spawn } = await import("node:child_process"); const { writeFileSync } = await import("node:fs");
+    const g = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+    writeFileSync(process.env.MOCK_GRANDCHILD, String(g.pid));
+  }
+  if (process.env.MOCK_HANG_SAY) process.stderr.write(`${process.env.MOCK_HANG_SAY}\n`);
+  process.on("SIGTERM", () => {}); // a wedged agent ignores SIGTERM: Hearth has to SIGKILL the group
+  setInterval(() => {}, 1000);
+  await new Promise(() => {});
+}
+// MOCK_OLD_STDERR=<text>: print it to stderr at start-up (an earlier run's output that must never be shown for a later run).
+if (process.env.MOCK_OLD_STDERR && !(process.env.MOCK_HANG_AT_START && existsSyncM(process.env.MOCK_HANG_AT_START))) process.stderr.write(`${process.env.MOCK_OLD_STDERR}\n`);
 // Minimal ACP agent used by the e2e tests. Behaviour is driven by the prompt text.
 import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk/unstable";

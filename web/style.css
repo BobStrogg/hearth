@@ -106,3 +106,4 @@ button.icon .ico { width:22px; height:22px; vertical-align:middle; }
 .adcount { color:var(--muted); font-weight:600; }
 .adtail { margin:.4rem 0; max-height:14em; overflow:auto; font-size:.75rem; white-space:pre-wrap; word-break:break-word; background:rgba(127,127,127,.14); padding:.4rem .5rem; border-radius:6px; }
 .adhint { color:var(--muted); }
+.adwhen { color:var(--muted); font-weight:400; } .adnone { font-family:inherit; font-style:italic; }

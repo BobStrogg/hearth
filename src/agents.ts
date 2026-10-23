@@ -91,19 +91,25 @@ export function probe(agents: AgentDef[]): ProbeResult[] {
 
 /** Deep probe: start the agent and run `initialize`, then kill it. */
 export async function deepProbe(a: AgentDef, timeoutMs = 20000): Promise<ProbeResult["deep"]> {
-  const child = spawn(a.command, a.args, { stdio: ["pipe", "pipe", "ignore"], env: { ...process.env, PATH: searchPath(), ...a.env }, ...winShell() });
+  // Its own process group, so the kill below also stops anything it started (an npx or shell wrapper's child).
+  const child = spawn(a.command, a.args, { stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32", env: { ...process.env, PATH: searchPath(), ...a.env }, ...winShell() });
+  let err = "";
+  child.stderr!.on("data", (d: Buffer) => { err = (err + d.toString()).slice(-2000); });
   try {
     const stream = acp.ndJsonStream(Writable.toWeb(child.stdin) as WritableStream<Uint8Array>, Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>);
     const conn = acp.probeClient(stream);
     const res = await Promise.race([
       conn.initialize({ protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} }),
-      new Promise<never>((_, rej) => { setTimeout(() => rej(new Error("timeout")), timeoutMs); child.on("error", rej); }),
+      new Promise<never>((_, rej) => {
+        setTimeout(() => { const last = err.split("\n").map((l) => l.trim()).filter(Boolean).at(-1)?.slice(0, 300); rej(new Error(last ? `timeout; its last output: ${last}` : "timeout (no output)")); }, timeoutMs).unref?.();
+        child.on("error", rej);
+      }),
     ]);
     return { ok: true, loadSession: !!res.agentCapabilities?.loadSession, authMethods: (res.authMethods ?? []).map((m) => m.id), agentName: res.agentInfo?.name };
   } catch (e) {
     return { ok: false, error: String((e as Error).message ?? e) };
   } finally {
-    child.kill("SIGKILL");
+    if (process.platform !== "win32" && child.pid) { try { process.kill(-child.pid, "SIGKILL"); } catch { child.kill("SIGKILL"); } } else child.kill("SIGKILL");
   }
 }
 

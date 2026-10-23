@@ -1,6 +1,17 @@
 # Changelog
 
-## Unreleased
+## 0.5.10
+- An agent that starts but never answers (it waits on a sign-in, an update, a macOS permission or keychain prompt, or
+  the network): the "Couldn't start the agent" note now shows what that process printed while Hearth waited, or says it
+  printed nothing (with its pid and start time). It never shows an earlier run's output, and Hearth's own clean-up kill
+  no longer adds a separate "Agent stopped (signal SIGTERM)" card.
+- Agent cards show when they happened, in your local time, and UTC timestamps in the agent's output are shown in local
+  time too.
+- `agent-stderr.log` marks the start of each run (`--- hearth X: started devin (pid N) at <local time> ---`) and moves a
+  full log to `agent-stderr.log.1`. Before, a log that reached 2 MB stopped growing, so it kept showing an old run.
+- Agents an earlier Hearth left running (Hearth was killed before it could stop them) are stopped when Hearth starts.
+  Only a recorded group leader that still runs the recorded command is stopped. The agent probe also stops the probed
+  agent's whole process group and reports its last output on a timeout.
 - Internal: moved to the ACP TypeScript SDK 2.x (`@agentclientprotocol/sdk` ^2.0.1). SDK 2 removed the connection classes
   Hearth used; `src/acp.ts` now wraps the SDK's client app API, and Hearth imports the SDK's `/unstable` entrypoint so
   it keeps the same ACP v1 features as before (session/list, session/resume, config options). No behaviour change.
