@@ -100,3 +100,9 @@ figcaption { margin-top:.2rem; font-size:.75rem; }
 button.icon .ico { width:22px; height:22px; vertical-align:middle; }
 #kbctl button .ico { width:16px; height:16px; vertical-align:middle; }
 .qbtn .ico { width:15px; height:15px; }
+/* The agent stopped or couldn't start: its last output, collapsed across repeated failures. */
+.note.agentdown { align-self:stretch; text-align:left; background:var(--card); border:1px solid var(--line); border-radius:10px; padding:.5rem .7rem; }
+.note.agentdown.err { border-color:var(--bad); } .note.agentdown.err .adtitle { color:var(--bad); }
+.adcount { color:var(--muted); font-weight:600; }
+.adtail { margin:.4rem 0; max-height:14em; overflow:auto; font-size:.75rem; white-space:pre-wrap; word-break:break-word; background:rgba(127,127,127,.14); padding:.4rem .5rem; border-radius:6px; }
+.adhint { color:var(--muted); }

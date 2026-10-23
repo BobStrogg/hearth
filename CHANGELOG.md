@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.9
+- When the agent exits by itself (while starting, while answering, or right after it was spawned), the chat shows one
+  card with how it exited (exit code or signal, and when) and its last 20 lines of stderr, kept in the transcript so it
+  survives a reload. Repeats of the same failure update that card (×N) instead of stacking "Agent stopped" lines.
+- Errors that used to say only "ACP connection closed" now say "agent exited (code): <its last stderr line>".
+- After 3 immediate failures in a row Hearth stops restarting the agent by itself: queued prompts pause with the reason
+  (Resume tries again), and the card says why. A send still tries, and the first prompt the agent answers resets it.
+- A message that couldn't be delivered because the agent couldn't start is put back in the composer.
+- Start failures that aren't an exit (a timeout, a missing command, an error answer) are kept in the transcript too.
+
 ## 0.5.8
 - Security: the single-file binaries attached to each release embed the Node.js that builds them, and 0.5.2 to 0.5.7
   were built on Node.js 22.23.2/22.23.3, before the October 2026 Node.js security release (CVE-2026-111497 Brotli decoder

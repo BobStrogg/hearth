@@ -275,6 +275,7 @@ class Chat {
     }
     if (this.busy && this.queue.items.length >= this.queue.max) return this.note(`The queue is full (${this.queue.max} prompts). Wait for the agent, or remove a queued prompt.`, "err");
     this.ws.send(JSON.stringify({ type: "prompt", content: [{ type: "text", text }] }));
+    this.lastSent = this.busy ? null : text; // a direct send: given back if the agent can't start
     if (this.state === "stopped" || this.state === "offline") this.starting(true); // immediate feedback; the server confirms
     this.input.value = ""; this.grow();
   }
@@ -432,8 +433,13 @@ class Chat {
     else if (m.type === "agent_ready") this.starting(false);
     else if (m.type === "permission_resolved") { this.perms.get(m.id)?.remove(); this.perms.delete(m.id); }
     else if (m.type === "prompt_done") { this.cur = null; if (m.stopReason !== "end_turn") this.note(`Stopped: ${m.stopReason}`); }
-    else if (m.type === "error" && /setting|config|mode|model/i.test(m.message) && this.options.length) { this.renderCtl(); this.note(m.message, "err"); }
-    else if (m.type === "error") { this.starting(false); this.note(/auth/i.test(m.message) ? `${m.message}. Sign in to this agent once on the computer itself (for example run "claude" then /login, or "grok login").` : m.message, "err"); }
+    else if (m.type === "error" && !/^couldn't start the agent/.test(m.message) && /setting|config|mode|model/i.test(m.message) && this.options.length) { this.renderCtl(); this.note(m.message, "err"); }
+    else if (m.type === "error") {
+      this.starting(false);
+      // the agent couldn't start, so that message never reached it: put it back in the box instead of losing it
+      if (/^couldn't start the agent/.test(m.message) && this.lastSent && !this.input.value.trim()) { this.input.value = this.lastSent; this.grow(); m = { ...m, message: `${m.message} (your message is back in the box)` }; }
+      this.lastSent = null;
+      this.note(/auth/i.test(m.message) ? `${m.message}. Sign in to this agent once on the computer itself (for example run "claude" then /login, or "grok login").` : m.message, "err"); }
     if (atBottom || initial) this.toEnd();
     if (initial) { this.watch(this.log); this.fillScreen(); }
   }
@@ -468,6 +474,32 @@ class Chat {
     this.hasMore = !!m.hasMore && items.length > 0; this.showTop();
     requestAnimationFrame(() => this.fillScreen());
   }
+  /**
+   * The agent stopped (or couldn't start): what it said on stderr and how it exited, in one card. Repeated failures with
+   * nothing but notes in between (a respawn that died again) update that card instead of stacking "Agent stopped" lines.
+   */
+  agentDown(m) {
+    const failed = m.event === "agent_start_failed" || (!m.intended && (m.fails || (m.code != null && m.code !== 0) || (m.signal && m.signal !== "SIGTERM")));
+    const how = m.event === "agent_start_failed" ? "" : m.signal ? ` (signal ${m.signal})` : m.code != null ? ` (exit code ${m.code})` : "";
+    const when = m.phase === "starting" ? " while starting" : m.phase === "prompt" ? " while answering" : "";
+    let card = this.downCard;
+    const onlyNotesAfter = (el) => { for (let n = el.nextElementSibling; n; n = n.nextElementSibling) if (!n.classList.contains("note")) return false; return true; };
+    const kind = [m.event, m.code, m.signal, m.phase, m.error].join("|"); // only the same failure collapses
+    if (card?.isConnected && card.parentElement === this.log && card.kind === kind && onlyNotesAfter(card)) {
+      while (card.nextElementSibling) card.nextElementSibling.remove(); // "restarted…", "starting…" between two failures
+      card.count = (card.count || 1) + 1;
+    } else { card = h("div", { class: "note agentdown" }); card.count = 1; this.log.append(card); this.downCard = card; }
+    card.kind = kind;
+    card.classList.toggle("err", !!failed);
+    const title = m.event === "agent_start_failed" ? `Couldn't start the agent: ${m.error}` : `Agent stopped${when}${how}.`;
+    const kids = [h("div", { class: "adtitle" }, title, card.count > 1 ? h("span", { class: "adcount", title: "times in a row" }, ` ×${card.count}`) : null)];
+    if (m.stderrTail) kids.push(h("pre", { class: "adtail", "aria-label": "The agent's last output" }, m.stderrTail));
+    kids.push(h("div", { class: "adhint" }, m.gaveUp
+      ? `It failed right after starting ${m.fails} times in a row, so Hearth stopped restarting it by itself (queued prompts wait). The output above usually says why: a login, a missing command, or a Node version problem. Fix it on the computer, then send again or press Resume.`
+      : failed ? "Send a message to try again." : "Send a message to restart it."));
+    card.replaceChildren(...kids);
+    const pre = card.querySelector(".adtail"); if (pre) pre.scrollTop = pre.scrollHeight; // the last lines matter most
+  }
   note(t, cls = "") { this.log.append(h("div", { class: `note ${cls}` }, t)); }
   entry(e) {
     if (e.seq <= this.lastSeq) return; // idempotent: an entry delivered twice (replay overlap, stray socket) is applied once
@@ -486,7 +518,7 @@ class Chat {
     } else if (e.dir === "in" && msg.method === "session/update") this.update(msg.params.update);
     else if (e.dir === "sys") {
       const ev = msg.event;
-      if (ev === "agent_exit") this.note("Agent stopped. Send a message to restart it.");
+      if (ev === "agent_exit" || ev === "agent_start_failed") this.agentDown(msg);
       else if (ev === "context_reset") this.note("Agent restarted without its memory of the earlier conversation (it doesn't support session/load).");
       else if (ev === "session_loaded") this.note("Agent restarted and reloaded the conversation.");
       else if (ev === "session_resumed") this.note("Agent restarted and resumed the conversation.");

@@ -1,5 +1,12 @@
 #!/usr/bin/env node
 import { existsSync as existsSyncM } from "node:fs";
+// MOCK_DIE_AT_START=<flag file>: while it exists, print a few lines to stderr and exit 1 before speaking ACP
+// (like an agent CLI that fails on this Node version or can't find a module).
+if (process.env.MOCK_DIE_AT_START && existsSyncM(process.env.MOCK_DIE_AT_START)) {
+  for (let i = 1; i <= 25; i++) process.stderr.write(`trace line ${i}\n`);
+  process.stderr.write("Error: The module 'better_sqlite3.node' was compiled against a different Node.js version (NODE_MODULE_VERSION 141)\n");
+  process.exit(1);
+}
 // Minimal ACP agent used by the e2e tests. Behaviour is driven by the prompt text.
 import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";

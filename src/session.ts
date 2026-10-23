@@ -23,6 +23,8 @@ export type LiveEvent =
   | ({ type: "queue" } & QueueView);
 
 class StartTimeout extends Error {}
+/** The last meaningful line an agent wrote to stderr (what to show in a one-line error). */
+const lastLine = (t: string) => t.split("\n").map((l) => l.trim()).filter(Boolean).at(-1)?.slice(0, 300) ?? "";
 interface Pending { params: acp.RequestPermissionRequest; resolve: (r: acp.RequestPermissionResponse) => void }
 export interface Term { buf: Buffer; truncated: boolean; exit?: { exitCode: number | null; signal: string | null }; done: Promise<void>; text(): string; kill(): void }
 
@@ -122,7 +124,31 @@ export class LiveSession {
     return { queued: false };
   }
   /** Resume a paused queue (or start a waiting one): runs the next prompt if the agent is free. */
-  resumeQueue() { this.retries = 0; this.retryAt = 0; this.queue.setPaused(false); this.kick(); }
+  resumeQueue() { this.retries = 0; this.retryAt = 0; this.quickFails = 0; this.queue.setPaused(false); this.kick(); }
+
+  /** An exit within this long of the agent being spawned (or while it starts or answers) counts as an immediate failure. */
+  static QUICK_EXIT_MS = 20_000;
+  /** After this many immediate failures in a row Hearth stops restarting the agent by itself (sends still try). */
+  static MAX_QUICK_FAILS = 3;
+  /** Immediate failures in a row (reset when a prompt completes, or on Resume). */
+  quickFails = 0;
+  get crashLooping() { return this.quickFails >= LiveSession.MAX_QUICK_FAILS; }
+  private phase: "starting" | "prompt" | "idle" = "idle";
+  private lastFailLine = "";
+  private lastExit?: { child: ChildProcess; code: number | null; signal: string | null; line: string };
+  /**
+   * "ACP connection closed" says nothing: when a request fails because the agent died, wait a moment for its exit
+   * and report that instead (exit code or signal and its last stderr line).
+   */
+  private async explain(e: unknown, child: ChildProcess | undefined): Promise<never> {
+    if (child && /connection closed|stream closed|EPIPE|ECONNRESET/i.test(String((e as Error)?.message ?? e))) {
+      if (child.exitCode === null && child.signalCode === null) await new Promise<void>((r) => { const t = setTimeout(r, 1500); child.once("exit", () => { clearTimeout(t); setImmediate(r); }); });
+      const x = this.lastExit;
+      if (x && x.child === child) throw new Error(`agent exited (${x.code ?? x.signal})${x.line ? `: ${x.line}` : ""}`);
+    }
+    throw e;
+  }
+  private intendedKills = new WeakSet<ChildProcess>();
 
   /** Delays before a queue paused by a failed prompt tries again by itself (then it waits for Resume). */
   static RETRY_MS = [15_000, 60_000, 300_000];
@@ -134,6 +160,7 @@ export class LiveSession {
    */
   kick(): boolean {
     if (!this.queue.items.length || this.turnActive || this.prompting || this.meta.state === "exited") return false;
+    if (this.crashLooping) return false; // it keeps dying right after it starts: don't respawn it by itself
     if (this.queue.paused) { if (!this.retryAt || Date.now() < this.retryAt) return false; this.retryAt = 0; this.queue.setPaused(false); }
     this.next(); return true;
   }
@@ -161,6 +188,10 @@ export class LiveSession {
     if (!err) { this.retries = 0; this.retryAt = 0; }
     if (!this.queue.items.length || this.meta.state === "exited") return;
     if (sendNow) { this.queue.setPaused(false); return this.next(); }
+    if (err && this.crashLooping) {
+      this.retryAt = 0;
+      return this.queue.setPaused(true, `the agent keeps exiting right after it starts (${this.quickFails} times in a row), so Hearth stopped restarting it by itself${this.lastFailLine ? `: ${this.lastFailLine}` : ""}. Fix it on the computer, then press Resume`);
+    }
     if (err) {
       // A failure (agent crashed, couldn't start, …) pauses the queue; it tries again by itself a few times, respawning the agent.
       const d = LiveSession.RETRY_MS[this.retries++];
@@ -251,7 +282,15 @@ export class LiveSession {
       if (c && c.exitCode === null) { this.recycling = true; try { await this.killChild(c); } catch { /* gone */ } finally { this.recycling = false; } }
       this.child = undefined; this.conn = undefined;
       if (this.meta.state !== "exited") this.setState("stopped");
-      throw new Error(`couldn't start the agent: ${String((e as Error)?.message ?? e)}`);
+      const why = String((e as Error)?.message ?? e);
+      // An exit is already in the transcript (with its output); anything else (a timeout, a missing command, an
+      // error answer such as "not logged in") is kept there too, so it is still visible after a reload.
+      if (!/^agent exited/.test(why)) {
+        this.quickFails++;
+        this.lastFailLine = why.slice(0, 300);
+        this.log("sys", { event: "agent_start_failed", error: why.slice(0, 2000), fails: this.quickFails, gaveUp: this.crashLooping || undefined });
+      }
+      throw new Error(`couldn't start the agent: ${why}`);
     }).then(() => {
       this.emit({ type: "agent_ready" });
       // The agent (re)started: a queue paused by a failure tries again now, and a waiting queue drains.
@@ -267,21 +306,31 @@ export class LiveSession {
       env: { ...process.env, PATH: searchPath(), ...this.agent.env }, ...winShell(),
     });
     this.child = child;
+    const spawnedAt = Date.now(); this.phase = "starting";
     let tail = "";
     child.stderr!.on("data", (d: Buffer) => { this.stderrLog(d); tail = (tail + d.toString()).slice(-2000); });
     const exited = new Promise<never>((_, rej) => {
       child.once("error", (e) => rej(e));
-      child.once("exit", (code, sig) => rej(new Error(`agent exited (${code ?? sig})`)));
+      child.once("exit", (code, sig) => { const last = lastLine(tail); rej(new Error(`agent exited (${code ?? sig})${last ? `: ${last}` : ""}`)); });
     });
     exited.catch(() => {});
     const step = <T,>(p: Promise<T>, what: string): Promise<T> => {
       let t: NodeJS.Timeout | undefined;
       const ms = LiveSession.START_TIMEOUT_MS;
       const late = new Promise<never>((_, rej) => { t = setTimeout(() => rej(new StartTimeout(`the agent didn't answer ${what} within ${Math.round(ms / 1000)} s`)), ms); t.unref?.(); });
-      return Promise.race([p, exited, late]).finally(() => clearTimeout(t));
+      return Promise.race([p, exited, late]).catch((e) => this.explain(e, child)).finally(() => clearTimeout(t));
     };
     child.once("exit", (code, signal) => {
-      this.log("sys", { event: "agent_exit", code, signal, stderrTail: tail.split("\n").slice(-8).join("\n") || undefined });
+      // Was this a failure (it died by itself while starting, answering, or right after it was spawned)?
+      const intended = this.intendedKills.has(child) || this.recycling || this.meta.state === "exited";
+      const phase = this.phase;
+      const quick = !intended && (phase !== "idle" || Date.now() - spawnedAt < LiveSession.QUICK_EXIT_MS);
+      this.lastExit = { child, code, signal, line: lastLine(tail) };
+      if (quick) { this.quickFails++; this.lastFailLine = lastLine(tail) || `exit ${code ?? signal}`; }
+      if (this.child === child) this.phase = "idle";
+      const stderrTail = tail.replace(/\s+$/, "").split("\n").slice(-20).join("\n") || undefined;
+      this.log("sys", { event: "agent_exit", code, signal, stderrTail, phase, intended: intended || undefined,
+        fails: quick ? this.quickFails : undefined, gaveUp: quick && this.crashLooping ? true : undefined });
       for (const [id, p] of this.pending) { p.resolve({ outcome: { outcome: "cancelled" } }); this.emit({ type: "permission_resolved", id }); }
       this.pending.clear();
       for (const t of this.terms.values()) t.kill();
@@ -359,6 +408,7 @@ export class LiveSession {
       await this.newAgentSession(step);
     }
     if (seeding) { this.meta.seeded = true; if (this.meta.importedFrom) this.meta.importedFrom.via = this.meta.agentSessionId === prior ? (caps.loadSession ? "load" : "resume") : "pending"; this.store.save(this.meta); }
+    this.phase = "idle";
     this.setState("idle");
     if (this.newlyCreated) { this.newlyCreated = false; await this.applyPrefs(); }
   }
@@ -367,6 +417,7 @@ export class LiveSession {
   private dropIdleReplay = false;
   private async killChild(c: ChildProcess) {
     if (c.exitCode !== null) return;
+    this.intendedKills.add(c);
     const gone = new Promise<void>((res) => c.once("exit", () => res()));
     try { process.kill(-c.pid!, "SIGTERM"); } catch { c.kill("SIGTERM"); }
     const t = setTimeout(() => { try { process.kill(-c.pid!, "SIGKILL"); } catch { /* gone */ } }, 3000);
@@ -384,15 +435,17 @@ export class LiveSession {
   async prompt(content: acp.ContentBlock[]) {
     await this.ensureRunning();
     if (this.prompting) throw new Error("agent is busy; cancel first");
-    this.prompting = true; this.dropIdleReplay = false; this.setState("running");
+    this.prompting = true; this.dropIdleReplay = false; this.phase = "prompt"; this.setState("running");
     try {
-      const r = await this.conn!.prompt({ sessionId: this.meta.agentSessionId!, prompt: content });
+      const child = this.child;
+      const r = await this.conn!.prompt({ sessionId: this.meta.agentSessionId!, prompt: content }).catch((e) => this.explain(e, child));
+      this.quickFails = 0; // it answered: not crash-looping
       if (this.meta.title === "New session") {
         const t = content.find((c) => c.type === "text") as { text?: string } | undefined;
         if (t?.text) { this.meta.title = t.text.slice(0, 60); }
       }
       return r;
-    } finally { this.prompting = false; if (this.alive) this.setState("idle"); }
+    } finally { this.prompting = false; if (this.phase === "prompt") this.phase = "idle"; if (this.alive) this.setState("idle"); }
   }
 
   async cancel(internal = false) {
@@ -417,6 +470,7 @@ export class LiveSession {
     try { await this.cancel(); } catch { /* ignore */ }
     const c = this.child;
     if (!c) return;
+    this.intendedKills.add(c);
     const kill = (sig: NodeJS.Signals) => { try { process.kill(-c.pid!, sig); } catch { c.kill(sig); } };
     kill("SIGTERM");
     await new Promise<void>((res) => { const t = setTimeout(() => { kill("SIGKILL"); res(); }, 5000); c.once("exit", () => { clearTimeout(t); res(); }); });
@@ -425,6 +479,7 @@ export class LiveSession {
   /** Daemon shutdown: stop the agent but keep the session resumable. */
   async shutdown() {
     const c = this.child; if (!c) return;
+    this.intendedKills.add(c);
     try { process.kill(-c.pid!, "SIGTERM"); } catch { c.kill("SIGTERM"); }
     await new Promise<void>((res) => { const t = setTimeout(() => { try { process.kill(-c.pid!, "SIGKILL"); } catch { /* gone */ } res(); }, 3000); c.once("exit", () => { clearTimeout(t); res(); }); });
   }
