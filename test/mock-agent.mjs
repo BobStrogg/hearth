@@ -9,7 +9,7 @@ if (process.env.MOCK_DIE_AT_START && existsSyncM(process.env.MOCK_DIE_AT_START))
 }
 // Minimal ACP agent used by the e2e tests. Behaviour is driven by the prompt text.
 import { Readable, Writable } from "node:stream";
-import * as acp from "@agentclientprotocol/sdk";
+import * as acp from "@agentclientprotocol/sdk/unstable";
 
 import { readFileSync } from "node:fs";
 const LOAD = process.env.MOCK_LOAD_SESSION === "1";
@@ -48,7 +48,27 @@ function cfgAll(s) {
 const fresh = (cwd) => ({ cwd, history: [], model: "m-small", mode: "code", effort: "low", web: false, legacyModel: "lm-a", legacyMode: "code" });
 let n = 0;
 
-new acp.AgentSideConnection((conn) => ({
+// Serve an old-style agent object (initialize/newSession/... methods) through the SDK's agent app API, with a
+// `conn` that has the old outbound helpers (sessionUpdate, requestPermission, fs, createTerminal).
+function serve(make, stream) {
+  const A = acp.methods.agent, C = acp.methods.client; let cx;
+  const conn = {
+    sessionUpdate: (p) => cx.notify(C.session.update, p),
+    requestPermission: (p) => cx.request(C.session.requestPermission, p),
+    readTextFile: (p) => cx.request(C.fs.readTextFile, p),
+    writeTextFile: (p) => cx.request(C.fs.writeTextFile, p),
+    createTerminal: (p) => cx.createTerminal(p),
+  };
+  const impl = make(conn), app = acp.agent({ name: "mock-agent" });
+  const reqs = { initialize: A.initialize, authenticate: A.authenticate, newSession: A.session.new, loadSession: A.session.load, listSessions: A.session.list,
+    resumeSession: A.session.resume, setSessionMode: A.session.setMode, setSessionConfigOption: A.session.setConfigOption, prompt: A.session.prompt };
+  for (const [k, m] of Object.entries(reqs)) if (impl[k]) app.onRequest(m, ({ params }) => impl[k](params));
+  if (impl.cancel) app.onNotification(A.session.cancel, ({ params }) => impl.cancel(params));
+  if (impl.extMethod) app.onRequest("*", ({ method, params }) => impl.extMethod(method, params));
+  cx = app.connect(stream).client;
+}
+
+serve((conn) => ({
   async initialize() {
     if (process.env.MOCK_SLOW_START) await new Promise((r) => setTimeout(r, Number(process.env.MOCK_SLOW_START)));
     if (process.env.MOCK_HANG_INIT && existsSyncM(process.env.MOCK_HANG_INIT)) await new Promise(() => {}); // never answers

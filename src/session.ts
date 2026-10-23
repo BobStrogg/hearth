@@ -3,7 +3,7 @@ import { appendFileSync, existsSync, realpathSync, statSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { Readable, Writable } from "node:stream";
-import * as acp from "@agentclientprotocol/sdk";
+import * as acp from "./acp.js";
 import { type AgentDef, searchPath, winShell } from "./agents.js";
 import type { SessionMeta, Store, TranscriptEntry } from "./store.js";
 import { absorb, applyUpdate, MODE_ID, MODEL_ID, normalize, setLocal, valid, type RawSettings, type UiOption } from "./settings.js";
@@ -88,7 +88,7 @@ export function within(root: string, p: string): boolean {
 
 export class LiveSession {
   child?: ChildProcess;
-  conn?: acp.ClientSideConnection;
+  conn?: acp.AgentLink;
   caps?: acp.InitializeResponse;
   pending = new Map<string, Pending>();
   listeners = new Set<(e: LiveEvent) => void>();
@@ -351,7 +351,7 @@ export class LiveSession {
     }));
     const w = raw.writable.getWriter();
     const writable = new WritableStream({ async write(msg) { self.log("out", msg); await w.write(msg); }, close: () => w.close() });
-    this.conn = new acp.ClientSideConnection(() => this.clientHandler(), { readable, writable } as acp.Stream);
+    this.conn = new acp.AgentLink(this.clientHandler(), { readable, writable } as acp.Stream);
 
     const init = await step(this.conn.initialize({
       protocolVersion: acp.PROTOCOL_VERSION,
@@ -488,7 +488,7 @@ export class LiveSession {
     if (!isAbsolute(p) || !within(this.meta.cwd, p)) throw acp.RequestError.invalidParams({ path: p }, "path outside the session folder");
   }
 
-  private clientHandler(): acp.Client {
+  private clientHandler(): acp.ClientHandlers {
     return {
       requestPermission: (params) => new Promise((resolveP) => {
         const id = `p${++this.permSeq}`;
