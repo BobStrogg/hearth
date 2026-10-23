@@ -3,7 +3,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { Readable, Writable } from "node:stream";
-import * as acp from "@agentclientprotocol/sdk";
+import * as acp from "./acp.js";
 import { type AgentDef, searchPath, winShell } from "./agents.js";
 
 export interface ExternalSession { sessionId: string; cwd: string; title?: string | null; updatedAt?: string | null }
@@ -22,7 +22,7 @@ export async function listExternal(a: AgentDef, opts: { cwd?: string; max?: numb
   const child = spawn(a.command, a.args, { cwd: opts.cwd ?? homedir(), stdio: ["pipe", "pipe", "ignore"], env: { ...process.env, PATH: searchPath(), ...a.env }, ...winShell() });
   const out: ExternalList = { agentId: a.id, source: "none", canLoad: false, canResume: false, sessions: [] };
   try {
-    const conn = new acp.ClientSideConnection(() => ({ requestPermission: async () => ({ outcome: { outcome: "cancelled" } }), sessionUpdate: async () => {} }),
+    const conn = acp.probeClient(
       acp.ndJsonStream(Writable.toWeb(child.stdin) as WritableStream<Uint8Array>, Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>));
     const fail = new Promise<never>((_, rej) => { setTimeout(() => rej(new Error("timeout")), opts.timeoutMs ?? 30000).unref(); child.once("error", rej); child.once("exit", () => rej(new Error("agent exited"))); });
     fail.catch(() => {});

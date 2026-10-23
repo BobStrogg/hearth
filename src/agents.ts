@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
 import { Readable, Writable } from "node:stream";
-import * as acp from "@agentclientprotocol/sdk";
+import * as acp from "./acp.js";
 
 export interface AgentDef {
   id: string;
@@ -94,7 +94,7 @@ export async function deepProbe(a: AgentDef, timeoutMs = 20000): Promise<ProbeRe
   const child = spawn(a.command, a.args, { stdio: ["pipe", "pipe", "ignore"], env: { ...process.env, PATH: searchPath(), ...a.env }, ...winShell() });
   try {
     const stream = acp.ndJsonStream(Writable.toWeb(child.stdin) as WritableStream<Uint8Array>, Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>);
-    const conn = new acp.ClientSideConnection(() => ({ requestPermission: async () => ({ outcome: { outcome: "cancelled" } }), sessionUpdate: async () => {} }), stream);
+    const conn = acp.probeClient(stream);
     const res = await Promise.race([
       conn.initialize({ protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} }),
       new Promise<never>((_, rej) => { setTimeout(() => rej(new Error("timeout")), timeoutMs); child.on("error", rej); }),

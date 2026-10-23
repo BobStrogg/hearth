@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+- Internal: moved to the ACP TypeScript SDK 2.x (`@agentclientprotocol/sdk` ^2.0.1). SDK 2 removed the connection classes
+  Hearth used; `src/acp.ts` now wraps the SDK's client app API, and Hearth imports the SDK's `/unstable` entrypoint so
+  it keeps the same ACP v1 features as before (session/list, session/resume, config options). No behaviour change.
+- CI/release actions and dev dependencies updated (Dependabot).
+
 ## 0.5.9
 - When the agent exits by itself (while starting, while answering, or right after it was spawned), the chat shows one
   card with how it exited (exit code or signal, and when) and its last 20 lines of stderr, kept in the transcript so it
