@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+- Goose (`goose acp`) is also found where [fm-serve-goose](https://github.com/BobStrogg/fm-serve-goose) installs it
+  (`~/Developer/fm-serve-goose/bin/goose`), as well as on the PATH, `~/.local/bin` and Homebrew. When that install is
+  the one found (directly or through a symlink) and its proxy for Apple's on-device model answers, Goose starts with the
+  repo's settings (provider, model, host, base path, context limit, read from its `config.example.yaml`); when the
+  proxy isn't running, Goose starts with its own config. `hearth probe` shows `[fm serve]` for that install.
+- Agents can now have `profiles` (in `src/agents.ts` or `agents.json`): settings for one particular install, read from
+  a file and used only while a health URL answers. `detect` and `bin` paths may start with `~/`.
+
 ## 0.5.13
 - Released instead of 0.5.12 (the v0.5.12 tag has no release: the macOS Intel release build's tests timed out). Same
   changes as 0.5.12 and 0.5.11 below. Test-only fix: the start-up timeout tests give the mock agent 4 s instead of 1 s,

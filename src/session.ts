@@ -4,7 +4,7 @@ import { mkdir, opendir, readFile, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { Readable, Writable } from "node:stream";
 import * as acp from "./acp.js";
-import { type AgentDef, searchPath, winShell } from "./agents.js";
+import { type AgentDef, resolveLaunch, searchPath, winShell } from "./agents.js";
 import type { SessionMeta, Store, TranscriptEntry } from "./store.js";
 import { absorb, applyUpdate, MODE_ID, MODEL_ID, normalize, setLocal, valid, type RawSettings, type UiOption } from "./settings.js";
 import { VERSION } from "./version.js";
@@ -371,17 +371,21 @@ export class LiveSession {
     const gen = this.shutdownGen;
     await this.checkFolder(this.meta.cwd).catch((e) => { if (e instanceof FolderBlocked) throw e; });
     // Stopped (Hearth closing, session ended) while the folder was being checked: no agent may appear after that.
-    if (gen !== this.shutdownGen || this.meta.state === "exited") throw new Error("stopped before the agent started");
-    const child = spawn(this.agent.command, this.agent.args, {
+    const stale = () => gen !== this.shutdownGen || this.meta.state === "exited";
+    if (stale()) throw new Error("stopped before the agent started");
+    // Which install, and its profile's settings if that applies right now (e.g. a local model's proxy answering).
+    const l = await resolveLaunch(this.agent);
+    if (stale()) throw new Error("stopped before the agent started");
+    const child = spawn(l.command, l.args, {
       cwd: this.meta.cwd, stdio: ["pipe", "pipe", "pipe"], detached: true,
-      env: { ...process.env, PATH: searchPath(), ...this.agent.env }, ...winShell(),
+      env: { ...process.env, PATH: searchPath(), ...l.env }, ...winShell(),
     });
     this.child = child;
     const spawnedAt = Date.now(); this.phase = "starting";
     const startedAt = new Date(spawnedAt).toISOString();
-    this.pids?.add(child.pid, this.agent.command);
+    this.pids?.add(child.pid, l.command);
     // Marks where this run's output starts in agent-stderr.log (local time with offset; the command name only, no args).
-    if (child.pid) this.stderrLog(`--- hearth ${VERSION}: started ${basename(this.agent.command)} (pid ${child.pid}) at ${localStamp(new Date(spawnedAt))} ---\n`);
+    if (child.pid) this.stderrLog(`--- hearth ${VERSION}: started ${basename(l.command)}${l.profile ? ` (${l.profile})` : ""} (pid ${child.pid}) at ${localStamp(new Date(spawnedAt))} ---\n${l.note ? `--- hearth: ${l.note} ---\n` : ""}`);
     let tail = "", stderrBytes = 0;
     child.stderr!.on("data", (d: Buffer) => { this.stderrLog(d); stderrBytes += d.length; tail = (tail + d.toString()).slice(-4000); });
     const tailLines = () => tail.replace(/\s+$/, "").split("\n").slice(-20).join("\n") || undefined;

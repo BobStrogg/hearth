@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { Readable, Writable } from "node:stream";
 import * as acp from "./acp.js";
-import { type AgentDef, searchPath, winShell } from "./agents.js";
+import { type AgentDef, resolveLaunch, searchPath, winShell } from "./agents.js";
 
 export interface ExternalSession { sessionId: string; cwd: string; title?: string | null; updatedAt?: string | null }
 export interface ExternalList {
@@ -19,7 +19,8 @@ export interface ExternalList {
 /** Start the agent briefly, ask for its sessions over ACP (session/list), fall back to its local files. */
 export async function listExternal(a: AgentDef, opts: { cwd?: string; max?: number; timeoutMs?: number } = {}): Promise<ExternalList> {
   const max = opts.max ?? 200;
-  const child = spawn(a.command, a.args, { cwd: opts.cwd ?? homedir(), stdio: ["pipe", "pipe", "ignore"], env: { ...process.env, PATH: searchPath(), ...a.env }, ...winShell() });
+  const l = await resolveLaunch(a);
+  const child = spawn(l.command, l.args, { cwd: opts.cwd ?? homedir(), stdio: ["pipe", "pipe", "ignore"], env: { ...process.env, PATH: searchPath(), ...l.env }, ...winShell() });
   const out: ExternalList = { agentId: a.id, source: "none", canLoad: false, canResume: false, sessions: [] };
   try {
     const conn = acp.probeClient(

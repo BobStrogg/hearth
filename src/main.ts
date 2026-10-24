@@ -55,7 +55,7 @@ async function main() {
     for (const p of probe(agents)) {
       let extra = "";
       if (p.installed && argv.includes("--deep")) extra = JSON.stringify(await deepProbe(agents.find((a) => a.id === p.id)!));
-      console.log(`${p.installed ? "✓" : " "} ${p.id.padEnd(11)} ${p.name.padEnd(16)} ${p.path ?? ""} ${extra}`);
+      console.log(`${p.installed ? "✓" : " "} ${p.id.padEnd(11)} ${p.name.padEnd(16)} ${p.path ?? ""}${p.profile ? ` [${p.profile}]` : ""} ${extra}`);
     }
     return;
   }
