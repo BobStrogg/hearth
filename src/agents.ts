@@ -33,7 +33,10 @@ export interface AgentProfile {
   envFile?: string;
   /** Only these keys from `envFile` (default: all of its UPPER_CASE keys). */
   keys?: string[];
-  /** Checked just before each launch (any 2xx within HEALTH_TIMEOUT_MS). `${NAME}` is filled in from the settings. */
+  /**
+   * Checked just before each launch (any 2xx within HEALTH_TIMEOUT_MS, no redirects). `${NAME}` is filled in from the
+   * settings. Must be on this machine (localhost, 127.x or ::1): anything else counts as not answering.
+   */
   healthUrl?: string;
 }
 
@@ -130,7 +133,8 @@ export function readEnvFile(file: string, keys?: string[]): Record<string, strin
     const m = /^(?:export\s+)?([A-Z][A-Z0-9_]*)\s*[:=]\s*(.*)$/.exec(line);
     if (!m || (keys && !keys.includes(m[1]))) continue;
     let v = m[2].trim();
-    if (/^(["']).*\1$/.test(v)) v = v.slice(1, -1); else v = v.replace(/\s+#.*$/, "").trim();
+    const q = /^(["'])(.*?)\1(?:\s+#.*)?$/.exec(v);
+    v = q ? q[2] : v.replace(/\s+#.*$/, "").trim();
     if (v !== "" && !/^[[{|>]/.test(v)) out[m[1]] = v;
   }
   return out;
@@ -149,9 +153,18 @@ export function matchProfile(a: AgentDef, found: string | undefined, home = home
 }
 
 export const HEALTH_TIMEOUT_MS = 1500;
+/** A health URL must be http(s) on this machine (loopback): a profile describes a local install, never a remote one. */
+export function localUrl(url: string): URL | null {
+  let u: URL; try { u = new URL(url); } catch { return null; }
+  const h = u.hostname.replace(/^\[|\]$/g, "");
+  return /^https?:$/.test(u.protocol) && (h === "localhost" || h === "::1" || /^127\.\d+\.\d+\.\d+$/.test(h)) ? u : null;
+}
+/** The URL as shown in notes: no user, password, query or fragment. */
+const shown = (url: string) => { try { const u = new URL(url); return u.origin + u.pathname; } catch { return "(invalid URL)"; } };
 async function answers(url: string): Promise<boolean> {
-  if (!/^https?:\/\//.test(url)) return false;
-  try { const r = await fetch(url, { signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS) }); await r.body?.cancel(); return r.ok; } catch { return false; }
+  const u = localUrl(url);
+  if (!u) return false;
+  try { const r = await fetch(u, { redirect: "error", signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS) }); await r.body?.cancel(); return r.ok; } catch { return false; }
 }
 
 export interface Launch { command: string; args: string[]; env: Record<string, string>; profile?: string; note?: string }
@@ -165,14 +178,19 @@ export async function resolveLaunch(a: AgentDef, home = homedir()): Promise<Laun
   const onPath = which(a.command);
   const found = a.profiles?.length || !onPath ? findAgent(a) : undefined;
   // The command isn't on the PATH but the same program was found elsewhere (e.g. "~/…/bin/goose"): start that one.
-  const same = (p: string) => basename(p).replace(/\.(exe|cmd)$/i, "") === basename(expandHome(a.command));
-  const command = !onPath && found && same(found) ? found : a.command;
+  const same = (p: string) => basename(p).replace(/\.(exe|cmd)$/i, "") === basename(expandHome(a.command, home));
+  const command = onPath && onPath !== a.command && a.command.startsWith("~") ? onPath : !onPath && found && same(found) ? found : a.command;
   const base: Launch = { command, args: a.args, env: { ...a.env } };
   const m = matchProfile(a, found, home);
   if (!m) return base;
-  const url = m.profile.healthUrl?.replace(/\$\{([A-Z0-9_]+)\}/g, (_, k: string) => (m.env[k] ?? process.env[k] ?? "").replace(/\/+$/, ""));
-  if (url && !(await answers(url))) return { ...base, note: `${m.profile.name}: ${url} didn't answer, so ${a.name} uses its own config` };
-  return { command: same(found!) ? found! : command, args: a.args, env: { ...m.env, ...a.env }, profile: m.profile.name };
+  // The settings it would launch with (Hearth's own env wins), so the check tests the host that would really be used.
+  const env = { ...m.env, ...a.env };
+  const url = m.profile.healthUrl?.replace(/\$\{([A-Z0-9_]+)\}/g, (_, k: string) => (env[k] ?? process.env[k] ?? "").replace(/\/+$/, ""));
+  if (url && !(await answers(url))) {
+    const why = localUrl(url) ? "didn't answer" : "isn't a local http(s) URL";
+    return { ...base, note: `${m.profile.name}: ${shown(url)} ${why}, so ${a.name} uses its own config` };
+  }
+  return { command: same(found!) ? found! : command, args: a.args, env, profile: m.profile.name };
 }
 
 /** Cheap probe: is a detect binary on the PATH (or at one of its paths)? */

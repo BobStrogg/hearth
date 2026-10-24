@@ -129,8 +129,8 @@ Add or override agents in `agents.json` next to the data directory:
 
 `detect` entries may also be paths (`~/` is the home folder). An agent can have `profiles`: settings for one
 particular install, used only when that binary (after following symlinks) is the one found, its `envFile` gives at
-least one `KEY: value` / `KEY=value` setting, and its `healthUrl` (if any) answers just before the launch. Otherwise the
-agent starts with its own config. Hearth's own `env` still wins.
+least one `KEY: value` / `KEY=value` setting, and its `healthUrl` (if any; on this machine only: `localhost`, `127.x`
+or `::1`) answers just before the launch. Otherwise the agent starts with its own config. Hearth's own `env` still wins.
 
 ```json
 [{ "id": "goose", "profiles": [{ "name": "local model", "bin": "~/tools/goose/bin/goose",

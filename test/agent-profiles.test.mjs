@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { BUILTIN_AGENTS, deepProbe, expandHome, matchProfile, probe, readEnvFile, resolveLaunch } from "../dist/agents.js";
+import { BUILTIN_AGENTS, deepProbe, expandHome, localUrl, matchProfile, probe, readEnvFile, resolveLaunch } from "../dist/agents.js";
 
 const win = process.platform === "win32";
 const MOCK = join(dirname(fileURLToPath(import.meta.url)), "mock-agent.mjs");
@@ -33,6 +33,7 @@ OPENAI_BASE_PATH: v1/chat/completions
 GOOSE_CONTEXT_LIMIT: 4096
 GOOSE_MODE: auto
 QUOTED: "a # b"
+QUOTED2: 'http://x' # with a comment
 extensions:
   developer:
     enabled: true
@@ -68,7 +69,7 @@ test("expandHome and readEnvFile (top-level UPPER_CASE keys, comments and quotes
   assert.equal(expandHome("~/a/b", "/h"), join("/h", "a/b")); assert.equal(expandHome("/x/~/y", "/h"), "/x/~/y"); assert.equal(expandHome("goose", "/h"), "goose");
   const f = join(root, "c.yaml"); writeFileSync(f, CONFIG.replace("PLACEHOLDER", "http://127.0.0.1:1"));
   const all = readEnvFile(f);
-  assert.deepEqual(all, { GOOSE_PROVIDER: "openai", GOOSE_MODEL: "system", OPENAI_HOST: "http://127.0.0.1:1", OPENAI_BASE_PATH: "v1/chat/completions", GOOSE_CONTEXT_LIMIT: "4096", GOOSE_MODE: "auto", QUOTED: "a # b" });
+  assert.deepEqual(all, { GOOSE_PROVIDER: "openai", GOOSE_MODEL: "system", OPENAI_HOST: "http://127.0.0.1:1", OPENAI_BASE_PATH: "v1/chat/completions", GOOSE_CONTEXT_LIMIT: "4096", GOOSE_MODE: "auto", QUOTED: "a # b", QUOTED2: "http://x" });
   assert.deepEqual(Object.keys(readEnvFile(f, ["GOOSE_MODEL", "NESTED_KEY"])), ["GOOSE_MODEL"]);
   assert.deepEqual(readEnvFile(join(root, "missing.yaml")), {});
   const e = join(root, "x.env"); writeFileSync(e, "export A_B=1\nC='two'\nlower=no\n"); assert.deepEqual(readEnvFile(e), { A_B: "1", C: "two" });
@@ -140,6 +141,30 @@ test("an agent whose command isn't found is never started as a different detect 
   const a = { id: "x", name: "X", detect: [det], command: "hearth-test-missing-npx", args: ["-y", "pkg"] };
   assert.equal(probe([a])[0].installed, true);
   assert.equal((await resolveLaunch(a)).command, "hearth-test-missing-npx");
+});
+
+test("health URLs: loopback only, the launch's own host, and never credentials in notes", { skip: win }, async () => {
+  assert.ok(localUrl("http://127.0.0.1:1/x") && localUrl("http://localhost:1/") && localUrl("http://[::1]:1/"));
+  assert.equal(localUrl("http://example.com/v1/models"), null); assert.equal(localUrl("file:///etc/passwd"), null); assert.equal(localUrl("nope"), null);
+  fakeAgent(join(repo, "bin", NAME), "f");
+  const srv = await healthServer(); const port = srv.address().port;
+  try {
+    // agents.json moves OPENAI_HOST to the live server: that host is checked (and used), not the file's dead one.
+    const a = { ...profileAgent(await freePort()), env: { OPENAI_HOST: `http://127.0.0.1:${port}` } };
+    const l = await resolveLaunch(a); assert.equal(l.profile, "fm serve"); assert.equal(l.env.OPENAI_HOST, `http://127.0.0.1:${port}`);
+    // A remote host is never contacted, and the note shows no user, password or query.
+    const r = await resolveLaunch({ ...a, env: { OPENAI_HOST: "http://user:secret@example.com" } });
+    assert.equal(r.profile, undefined); assert.match(r.note, /http:\/\/example\.com\/v1\/models isn't a local http\(s\) URL/); assert.doesNotMatch(r.note, /secret|user/);
+    const q = await resolveLaunch({ ...a, profiles: [{ ...a.profiles[0], healthUrl: "http://u:pw@127.0.0.1:1/h?token=abc" }] });
+    assert.doesNotMatch(q.note, /pw|token|abc/);
+  } finally { await new Promise((ok) => srv.close(ok)); }
+});
+
+test("a ~/ command is started from the home folder", { skip: win }, async () => {
+  const bin = fakeAgent(join(home, "tools", "hearth-test-tilde"), "g");
+  const a = { id: "t", name: "T", detect: ["~/tools/hearth-test-tilde"], command: "~/tools/hearth-test-tilde", args: [] };
+  assert.equal((await resolveLaunch(a)).command, bin);
+  const d = await deepProbe(a, 15000); assert.equal(d.ok, true, d.error);
 });
 
 // A real Goose, when one is given (not in CI): HEARTH_TEST_GOOSE=/path/to/goose npm test
