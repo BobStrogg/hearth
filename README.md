@@ -25,6 +25,13 @@ Cursor and Devin.
   agent finishes a turn or is waiting for your approval, even with Hearth closed. Skipped while you're looking at that
   session. Standard VAPID Web Push, encrypted end to end, no third-party account; on iPhone/iPad add Hearth to the
   Home Screen first.
+- **Voice (opt-in).** A mic button by the message box dictates into it (the words appear as you speak, so you can edit
+  before sending), a speaker toggle reads finished replies aloud (code, tool output and diffs are skipped), each reply
+  has its own speaker button, and an optional hands-free mode listens again after a reply is read. It uses the
+  browser's own speech recognition and voices where they exist. Where they don't (the Tesla browser, Firefox), or if
+  you'd rather your voice stayed private, the browser records and **this computer** transcribes it with
+  [whisper.cpp](https://github.com/ggml-org/whisper.cpp) and reads replies with macOS `say` (or piper / espeak-ng on
+  Linux). In a Tesla the browser's microphone needs software 2026.26 or later on an AMD Ryzen car. Set it up from *Voice settings* (⋯ in a session) or with `hearth voice install`. Settings are per device.
 - **Files in the browser.** Browse, download and upload files (📁 Files) in your home folder, with nothing to install.
   Downloads stream; uploads are chunked and resume after a dropped connection.
 - **Updates itself.** `hearth update` (and the optional auto-update) pulls a verified release from GitHub, restarts the
@@ -68,6 +75,7 @@ hearth service uninstall|start|stop|restart|status|logs
 hearth doctor [--offline]      check the install, config, agents, port and service
 hearth update [--check]        update from GitHub Releases (sha256-verified), restart, roll back if unhealthy
 hearth probe [--deep]          list the ACP agents found on this machine
+hearth voice [status|install]  private speech to text on this computer (whisper.cpp + a 60 MB model)
 hearth hash-password <pw>      make a HEARTH_PASSWORD=scrypt:… value
 ```
 
@@ -105,6 +113,12 @@ An existing `~/.hearth` is kept on every OS. Override with `HEARTH_HOME` / `HEAR
 | `HEARTH_PUSH` | `on` | `off` turns notifications off. When on, nothing is sent until a device opts in |
 | `HEARTH_PUSH_SUBJECT` | first `https://` allowed origin | VAPID contact (`mailto:` or `https:` URL) sent to push services |
 | `HEARTH_PUSH_HOSTS` | | Extra push-service hosts to allow (Google, Mozilla, Apple and Microsoft are built in) |
+| `HEARTH_VOICE` | `on` | `off` hides the mic's computer-side fallback and `/api/voice` (browser speech features still work) |
+| `HEARTH_WHISPER_BIN` | `whisper-cli` on PATH or in Homebrew | whisper.cpp command for speech to text |
+| `HEARTH_WHISPER_MODEL` | `<data>/models/ggml-base.en-q5_1.bin` | A whisper.cpp `ggml-*.bin` model (`hearth voice install` downloads the default, SHA-256 checked) |
+| `HEARTH_TTS` | `on` | `off` = no computer-side text to speech |
+| `HEARTH_SAY_VOICE` | system voice | macOS `say` voice for computer-side read-aloud (e.g. `Ava (Premium)`) |
+| `HEARTH_PIPER_MODEL` | | Linux: a piper `.onnx` voice (used before espeak-ng when set) |
 
 ## Supported agents
 
@@ -156,6 +170,12 @@ on-device model via `fm serve`, macOS 27) gets that repo's provider settings whi
 - **Notifications:** the VAPID key pair lives in the data dir (`vapid.json`, mode 600) and subscriptions per user in
   `users/<id>/push.json`. Payloads (session title, the end of the reply or the tool awaiting approval) are encrypted
   for the subscribing device (RFC 8291); Hearth only posts to known push-service hosts.
+- **Voice:** `/api/voice/*` sits behind the same identity, unlock and CSRF checks. Recordings must be 16-bit PCM WAV,
+  at most 8 MB and 120 s; text to speak at most 6,000 characters; one job runs at a time with a deadline. Audio and
+  text go to temp files in a private temp folder that is deleted as soon as the job ends; nothing is sent anywhere
+  else. No macOS microphone or Speech Recognition permission is involved: the browser records, and whisper.cpp and
+  `say` only read and write files. (The browser's built-in recognition is the browser vendor's service: Safari uses
+  Apple's, Chrome uses Google's. Choose "This computer (private)" in Voice settings to avoid it.)
 - **Agents run as you.** An agent can do anything your account can, which is why the password unlock is on by default on
   macOS.
 - **Updates:** release assets are checked against the release's `SHA256SUMS` before anything is installed. The web UI's

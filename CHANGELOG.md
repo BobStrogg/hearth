@@ -9,6 +9,21 @@
 - Agents can now have `profiles` (in `src/agents.ts` or `agents.json`): settings for one particular install, read from
   a file and used only while a health URL answers. `detect` and `bin` paths may start with `~/`.
 
+## 0.6.0
+- Voice, all opt-in and per device. A mic button by the message box dictates into it: the browser's own speech
+  recognition streams words into the box as you speak, and nothing is sent until you tap Send (or turn on "Send when I
+  stop talking"). A speaker pill by the composer reads each finished reply aloud with the browser's best voice
+  (on-device Premium/Enhanced voices first); code blocks, diffs, tool calls, links and markdown are left out ("code
+  omitted"). Each reply has its own speaker button. Hands-free (off by default) listens again after a reply is read.
+  Speaking stops when you tap the mic, Send or Stop.
+- Where the browser has no working speech recognition or voices (the Tesla browser, Firefox, Chromium builds without
+  Google's service), or by choice for privacy, this computer does it: the browser records 16 kHz WAV and Hearth runs
+  whisper.cpp (`whisper-cli`), and replies are read with macOS `say` (AAC) or piper / espeak-ng on Linux. Set it up from
+  Voice settings (⋯ in a session) or `hearth voice install` (Homebrew `whisper-cpp` plus a 60 MB SHA-256-checked
+  English model). New `GET /api/voice`, `POST /api/voice/transcribe|speak|install` behind the usual auth and CSRF
+  checks, with size, length and time limits; temp files are deleted after each job. `HEARTH_VOICE=off` turns the
+  computer side off. `hearth doctor` reports it.
+
 ## 0.5.13
 - Released instead of 0.5.12 (the v0.5.12 tag has no release: the macOS Intel release build's tests timed out). Same
   changes as 0.5.12 and 0.5.11 below. Test-only fix: the start-up timeout tests give the mock agent 4 s instead of 1 s,

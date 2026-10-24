@@ -107,3 +107,18 @@ button.icon .ico { width:22px; height:22px; vertical-align:middle; }
 .adtail { margin:.4rem 0; max-height:14em; overflow:auto; font-size:.75rem; white-space:pre-wrap; word-break:break-word; background:rgba(127,127,127,.14); padding:.4rem .5rem; border-radius:6px; }
 .adhint { color:var(--muted); }
 .adwhen { color:var(--muted); font-weight:400; } .adnone { font-family:inherit; font-style:italic; }
+/* Voice: mic by the message box, read-aloud toggle with the agent pills, a speaker on each reply. */
+.composer .mic { min-width:44px; padding:0 .6rem; display:inline-flex; align-items:center; justify-content:center; color:var(--muted); flex:none; }
+.composer .mic[hidden] { display:none; }
+.composer .mic .ico { width:20px; height:20px; }
+.composer .mic.rec { color:#fff; background:var(--bad); border-color:var(--bad); animation:micpulse 1.2s ease-in-out infinite; }
+.composer .mic.busy { color:var(--acc); border-color:var(--acc); opacity:.8; }
+@keyframes micpulse { 50% { box-shadow:0 0 0 6px #ef5f5f33; } }
+@media (prefers-reduced-motion: reduce) { .composer .mic.rec { animation:none; } }
+.ctl .readtg { padding:.15rem .6rem; display:inline-flex; align-items:center; }
+.ctl .readtg.on { color:var(--acc); border-color:var(--acc); }
+.msg .say { float:right; min-height:26px; min-width:26px; padding:0; margin:-.25rem -.45rem .1rem .35rem; border:0; background:none; color:var(--muted); display:none; align-items:center; justify-content:center; border-radius:99px; }
+body.voice-out .msg .say { display:inline-flex; }
+.msg .say.on { color:var(--acc); }
+.msg .say .ico { width:16px; height:16px; }
+.sheet-body .err:empty { display:none; }

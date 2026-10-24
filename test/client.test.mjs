@@ -29,7 +29,7 @@ function browser(hash) {
   w.WebSocket = class extends WebSocket { constructor(u) { super(u, { headers: { origin: base } }); sockets.push(this); } };
   Object.defineProperty(w.document, "visibilityState", { get: () => "visible", configurable: true });
   w.matchMedia = () => ({ matches: false });
-  for (const f of ["md.js", "app.js"]) w.eval(readFileSync(join(WEB, f), "utf8") + (f === "app.js" ? "\n;window.__chat = () => chat;" : ""));
+  for (const f of ["md.js", "voice.js", "app.js"]) w.eval(readFileSync(join(WEB, f), "utf8") + (f === "app.js" ? "\n;window.__chat = () => chat;" : ""));
   return { w, sockets, $: (s) => w.document.querySelector(s) };
 }
 const until = async (f, ms = 8000) => { const t = Date.now(); while (!f()) { if (Date.now() - t > ms) throw new Error("timeout"); await new Promise((r) => setTimeout(r, 25)); } };

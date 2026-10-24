@@ -9,6 +9,7 @@ import { serviceManager, tail } from "./service.js";
 import { update } from "./update.js";
 import { VERSION } from "./version.js";
 import { nodeFloorCheck } from "./node-floor.js";
+import { describe as describeVoice, Voice } from "./voice.js";
 
 const USAGE = `hearth ${VERSION}: web UI for ACP coding agents
 
@@ -21,6 +22,7 @@ const USAGE = `hearth ${VERSION}: web UI for ACP coding agents
   hearth service uninstall|start|stop|restart|status|logs
   hearth doctor [--offline]      check the install, config, agents, port and service
   hearth update [--check] [--force]   update from GitHub Releases, restart the service, roll back if unhealthy
+  hearth voice [status|install]  private speech to text on this computer (whisper.cpp + a 60 MB model) for the mic button
   hearth probe [--deep]          list the ACP agents found on this machine
   hearth hash-password <pw>      make a HEARTH_PASSWORD=scrypt:… value
   hearth --version
@@ -57,6 +59,14 @@ async function main() {
       if (p.installed && argv.includes("--deep")) extra = JSON.stringify(await deepProbe(agents.find((a) => a.id === p.id)!));
       console.log(`${p.installed ? "✓" : " "} ${p.id.padEnd(11)} ${p.name.padEnd(16)} ${p.path ?? ""}${p.profile ? ` [${p.profile}]` : ""} ${extra}`);
     }
+    return;
+  }
+  if (cmd === "voice") {
+    const v = new Voice(dataDir()); const sub = argv[1] ?? "status";
+    if (sub === "install") {
+      try { await v.runInstall((m) => console.log(m)); } catch (e) { console.error(`Couldn't set up speech to text: ${(e as Error).message}`); process.exitCode = 1; }
+    } else if (sub !== "status") { console.error("usage: hearth voice [status|install]"); process.exit(2); }
+    for (const l of describeVoice(v)) console.log(l);
     return;
   }
   if (cmd === "doctor") { const fails = printChecks(await doctor({ online: !f.offline })); process.exitCode = fails ? 1 : 0; return; }

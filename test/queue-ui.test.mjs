@@ -61,6 +61,8 @@ async function checkIcons(page) {
   assert.ok(r.n >= 12, `svg icons shown: ${r.n}`); assert.equal(r.tiny, 0); assert.deepEqual(r.names, ["grip", "play", "trash"]);
   assert.deepEqual(r.glyphs, []); assert.equal(r.edit, false, "no pencil button");
 }
+/** page.click, retried when the list redraws between finding the node and clicking it (slow CI runners). */
+const click = async (page, sel) => { for (let i = 0; ; i++) { try { return await page.click(sel); } catch (e) { if (i >= 4 || !/detached|not clickable|No node/i.test(String(e?.message))) throw e; await sleep(150); } } };
 const box = async (page, sel) => page.evaluate((s) => { const b = document.querySelector(s).getBoundingClientRect(); return { x: b.x + b.width / 2, y: b.y + b.height / 2, h: b.height }; }, sel);
 
 test("Tesla 1920x1200: SVG icons, drag the handle to reorder, click the text to edit in place", { skip: !CHROME && "no Chrome" }, async () => {
@@ -82,7 +84,7 @@ test("Tesla 1920x1200: SVG icons, drag the handle to reorder, click the text to 
   const g2 = await box(page, ".qitem:nth-child(2) .qgrip"); await page.mouse.click(g2.x, g2.y); await sleep(200);
   assert.equal(order()[1], "Run the linter and fix warnings"); assert.equal(await page.$(".qedit"), null);
   // click the text: edits in place (keyboard mode comes up in the Tesla browser), Enter saves
-  await page.click(".qitem:nth-child(2) .qtext");
+  await click(page, ".qitem:nth-child(2) .qtext");
   await page.waitForSelector(".qitem:nth-child(2) textarea.qedit");
   assert.equal(await page.evaluate(() => document.activeElement?.classList.contains("qedit")), true);
   await page.keyboard.type(" (only src/)");
@@ -91,12 +93,12 @@ test("Tesla 1920x1200: SVG icons, drag the handle to reorder, click the text to 
   await page.keyboard.press("Enter");
   await until(() => order()[1] === "Run the linter and fix warnings (only src/)", "edit saved on the server");
   // Esc cancels
-  await page.click(".qitem:nth-child(1) .qtext"); await page.waitForSelector("textarea.qedit");
+  await click(page, ".qitem:nth-child(1) .qtext"); await page.waitForSelector("textarea.qedit");
   await page.keyboard.type(" XXX"); await page.keyboard.press("Escape");
   await until(() => page.evaluate(() => !document.querySelector("textarea.qedit")), "editor closed");
   assert.equal(order()[0], "Update the README with the new flags");
   // the trash can deletes
-  await page.click(".qitem:nth-child(4) button[aria-label='Delete']");
+  await click(page, ".qitem:nth-child(4) button[aria-label='Delete']");
   await until(() => order().length === 3, "deleted");
   assert.deepEqual(page.logs, []);
   l.queue.clear(); await l.cancel(); await page.close();

@@ -20,8 +20,13 @@ let h, base, root, data, hang, grand;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 const START = LiveSession.START_TIMEOUT_MS;
+/** A start that must hang: only then is the timeout short (4 s, as the messages say). Normal starts keep the default
+ *  (minutes), so a loaded CI runner (macOS Intel) that takes a few seconds to start node can't trip it. */
+async function hungStart(l) {
+  LiveSession.START_TIMEOUT_MS = 4000;
+  try { return await l.ensureRunning(); } finally { LiveSession.START_TIMEOUT_MS = START; }
+}
 before(async () => {
-  LiveSession.START_TIMEOUT_MS = 4000;   // the hang must trip it, a normal start on a slow CI runner (macOS Intel) must not
   root = mkdtempSync(join(tmpdir(), "hearth-troot-")); mkdirSync(join(root, "p"));
   data = mkdtempSync(join(tmpdir(), "hearth-tdata-")); hang = join(data, "hang"); grand = join(data, "grandchild.pid");
   const env = { MOCK_HANG_AT_START: hang, MOCK_OLD_STDERR: "2026-10-22T14:09:54.080463Z  INFO OLD RUN LINE", MOCK_GRANDCHILD: grand, MOCK_LOAD_SESSION: "1" };
@@ -49,7 +54,7 @@ test("silent hang: the note says it printed nothing (with its pid and start time
   const { id, l } = await wedged("quiet");
   try {
     const exitsBefore = sys(id, "agent_exit").length;
-    await assert.rejects(l.ensureRunning(), /didn't answer initialize within 4 s and printed nothing since it started/);
+    await assert.rejects(hungStart(l), /didn't answer initialize within 4 s and printed nothing since it started/);
     const f = sys(id, "agent_start_failed").at(-1).msg;
     assert.equal(f.timeout, true); assert.equal(f.noOutput, true); assert.equal(f.stderrTail, undefined);
     assert.ok(Number.isInteger(f.pid) && f.pid > 0); assert.ok(!isNaN(Date.parse(f.startedAt)));
@@ -69,7 +74,7 @@ test("silent hang: the note says it printed nothing (with its pid and start time
 test("hang with output: the note carries this run's stderr and its last line", async () => {
   const { id, l } = await wedged("talks");
   try {
-    await assert.rejects(l.ensureRunning(), /didn't answer initialize within 4 s; its last output: Checking for updates…/);
+    await assert.rejects(hungStart(l), /didn't answer initialize within 4 s; its last output: Checking for updates…/);
     const f = sys(id, "agent_start_failed").at(-1).msg;
     assert.equal(f.stderrTail, "Checking for updates…"); assert.equal(f.noOutput, undefined);
   } finally { rmSync(hang, { force: true }); }
@@ -78,7 +83,7 @@ test("hang with output: the note carries this run's stderr and its last line", a
 test("the timeout stops the agent's whole process group (a child it started too), even if it ignores SIGTERM", { skip: !POSIX && "process groups" }, async () => {
   const { l } = await wedged("quiet");
   try {
-    await assert.rejects(l.ensureRunning(), /didn't answer initialize/);
+    await assert.rejects(hungStart(l), /didn't answer initialize/);
     const g = Number(readFileSync(grand, "utf8"));
     for (let i = 0; i < 50 && alive(g); i++) await sleep(50);
     assert.equal(alive(g), false, "the grandchild is gone");
@@ -128,7 +133,7 @@ test("browser: the timeout note shows 'no output since it started at <local time
   const { default: puppeteer } = await import("puppeteer-core");
   const browser = await puppeteer.launch({ executablePath: CHROME, headless: true, args: ["--no-sandbox"], env: { ...process.env, TZ: "America/Chicago" } });
   try {
-    await assert.rejects(l.ensureRunning(), /didn't answer initialize/);
+    await assert.rejects(hungStart(l), /didn't answer initialize/);
     const page = await browser.newPage(); const errs = []; page.on("pageerror", (e) => errs.push(String(e)));
     await page.setViewport({ width: 1280, height: 800 });
     await page.goto(`${base}/#/s/${id}`); await page.waitForSelector(".note.agentdown"); await sleep(400);

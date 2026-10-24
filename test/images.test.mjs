@@ -111,7 +111,7 @@ test("renders image blocks, markdown images, tool images; lightbox; SVG only via
   assert.equal(info.filter((i) => i.inTool).length, 2, "tool content image + rawOutput image (deduped)");
   assert.ok(info.some((i) => i.src.startsWith("/api/sessions/")), "file images go through the endpoint");
   // text after an image block stays after it
-  const order = await page.$eval(".msg.agent", (m) => [...m.children].map((c) => c.tagName + ":" + c.textContent.trim()));
+  const order = await page.$eval(".msg.agent", (m) => [...m.children].filter((c) => !c.classList.contains("say")).map((c) => c.tagName + ":" + c.textContent.trim()));
   assert.deepEqual(order.map((x) => x.split(":")[0]), ["DIV", "FIGURE", "DIV"], JSON.stringify(order));
   // unsafe/outside references aren't images
   const txt = await page.$eval(".log", (l) => l.textContent);
