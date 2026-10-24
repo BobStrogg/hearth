@@ -31,6 +31,10 @@ const ICONS = {
   grip: '<g fill="currentColor" stroke="none"><circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/></g>',
   play: '<path d="M8 5l11 7-11 7z" fill="currentColor"/>',
   trash: '<path d="M4 7h16M10 11v6M14 11v6M9 7V4h6v3"/><path d="M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13"/>',
+  mic: '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3M9 21h6"/>',
+  volume: '<path d="M4 9v6h4l5 4V5L8 9z"/><path d="M16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12"/>',
+  volumeOff: '<path d="M4 9v6h4l5 4V5L8 9z"/><path d="M17 9l5 6M22 9l-5 6"/>',
+  stop: '<rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/>',
 };
 const ico = (name, cls = "") => {
   const w = document.createElement("span");
@@ -74,6 +78,7 @@ async function showList() {
   setHeader("Hearth");
   const me = await api("GET", "/api/me");
   if (me.needsPassword && !me.unlocked) return showLock();
+  Voice.enabled = !!me.voice;
   const [list, ag] = await Promise.all([api("GET", "/api/sessions"), api("GET", "/api/agents")]);
   agents = ag;
   const name = (id) => agents.find((a) => a.id === id)?.name ?? id;
@@ -182,6 +187,244 @@ async function importSessions() {
   if (installed.length) await load();
 }
 
+// ---------- voice ----------
+// Mic: the browser's own speech recognition when it has one (words stream into the box so you can edit before
+// sending), otherwise (the Tesla browser, Firefox) or by choice: record here and let this computer transcribe it with
+// whisper.cpp (private: the audio never leaves your computers). Read aloud: speechSynthesis, otherwise this computer's
+// text-to-speech (macOS `say`) played as audio. All of it is opt-in and remembered per device.
+const HV = window.HearthVoice || null;
+const VP = { // per-device preferences (localStorage)
+  get: (k, d) => { try { const v = localStorage.getItem(`hearth.voice.${k}`); return v == null ? d : v; } catch { return d; } },
+  set: (k, v) => { try { localStorage.setItem(`hearth.voice.${k}`, String(v)); } catch { /* private mode */ } },
+  on: (k) => VP.get(k, "0") === "1",
+};
+const Voice = {
+  caps: null, capsAt: 0, enabled: false,
+  SR: window.SpeechRecognition || window.webkitSpeechRecognition || null,
+  canRecord: !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && (window.AudioContext || window.webkitAudioContext)),
+  synth: "speechSynthesis" in window && typeof window.SpeechSynthesisUtterance === "function" ? window.speechSynthesis : null,
+  async refresh(force) {
+    if (this.enabled && HV && (force || !this.caps || Date.now() - this.capsAt >= 60000)) {
+      try { this.caps = await api("GET", "/api/voice"); this.capsAt = Date.now(); } catch { this.caps = null; }
+    }
+    if (!this.enabled) this.caps = null;
+    document.body.classList.toggle("voice-out", this.outputMode() != null);
+    return this.caps;
+  },
+  srUsable() { return !!this.SR && !VP.on("srBroken"); },
+  /** "browser" | "computer" | null (no way to dictate here) | "setup" (could, once this computer is set up). */
+  inputMode() {
+    if (!HV) return null;
+    const pref = VP.get("stt", "auto"), comp = !!this.caps?.stt?.available && this.canRecord;
+    if (pref === "computer" && comp) return "computer";
+    if (pref === "browser" && this.SR) return "browser";
+    if (this.srUsable()) return "browser";
+    if (comp) return "computer";
+    return this.canRecord && this.enabled ? "setup" : null;
+  },
+  voices() { try { return this.synth ? this.synth.getVoices() : []; } catch { return []; } },
+  outputMode() {
+    if (!HV) return null;
+    const pref = VP.get("tts", "auto"), comp = !!this.caps?.tts?.available, br = !!this.synth && this.voices().length > 0;
+    if (pref === "computer" && comp) return "computer";
+    if (pref === "browser" && br) return "browser";
+    return br ? "browser" : comp ? "computer" : this.synth ? "browser" : null;
+  },
+};
+if (Voice.synth) { try { Voice.synth.addEventListener?.("voiceschanged", () => document.body.classList.toggle("voice-out", Voice.outputMode() != null)); } catch { /* old browsers */ } }
+
+/** Reads text aloud; one thing at a time. `done(natural)` runs when it finishes (natural=false when stopped). */
+const Speech = {
+  audio: null, speakingEl: null, token: 0, onDone: null,
+  el() { if (!this.audio) { this.audio = new Audio(); this.audio.preload = "auto"; } return this.audio; },
+  /** Call from a tap: iOS and some car browsers only allow speech and audio that a tap started first. */
+  unlock() {
+    if (this.unlocked || !HV) return; this.unlocked = true;
+    try { if (Voice.synth) { const u = new SpeechSynthesisUtterance(" "); u.volume = 0; Voice.synth.speak(u); } } catch { /* ignore */ }
+    try { const a = this.el(); a.src = URL.createObjectURL(new Blob([HV.encodeWav(new Float32Array(800))], { type: "audio/wav" })); a.play().catch(() => {}); } catch { /* ignore */ }
+  },
+  stop() {
+    const was = this.active; this.active = false; this.token++;
+    try { Voice.synth?.cancel(); } catch { /* ignore */ }
+    if (this.audio) { try { this.audio.pause(); } catch { /* ignore */ } }
+    this.mark(null);
+    const d = this.onDone; this.onDone = null; if (was && d) d(false);
+  },
+  mark(el) { this.speakingEl?.querySelector(":scope > .say")?.classList.remove("on"); this.speakingEl = el; el?.querySelector(":scope > .say")?.classList.add("on"); },
+  finish(tok) { if (tok !== this.token) return; this.active = false; this.mark(null); const d = this.onDone; this.onDone = null; d?.(true); },
+  async speak(md, { el = null, done = null } = {}) {
+    this.stop();
+    const text = HV ? HV.speakable(md) : ""; if (!text) { done?.(true); return; }
+    const mode = Voice.outputMode(); if (!mode) { done?.(true); return; }
+    const tok = ++this.token; this.active = true; this.onDone = done; this.mark(el);
+    if (mode === "browser") {
+      const parts = HV.splitSentences(text), voice = HV.pickVoice(Voice.voices(), navigator.language || "en-US", VP.get("voiceURI", ""));
+      const rate = Math.min(2, Math.max(0.5, Number(VP.get("rate", "1")) || 1));
+      try { Voice.synth.cancel(); } catch { /* ignore */ }
+      parts.forEach((p, i) => {
+        const u = new SpeechSynthesisUtterance(p); if (voice) { u.voice = voice; u.lang = voice.lang; } else u.lang = navigator.language || "en-US";
+        u.rate = rate;
+        if (i === parts.length - 1) { u.onend = () => this.finish(tok); }
+        u.onerror = (e) => { if (e.error !== "interrupted" && e.error !== "canceled") this.finish(tok); };
+        Voice.synth.speak(u);
+      });
+      return;
+    }
+    try {
+      const r = await fetch("/api/voice/speak", { method: "POST", credentials: "same-origin", headers: { "content-type": "application/json", "x-hearth-csrf": "1" }, body: JSON.stringify({ text }) });
+      if (tok !== this.token) return;
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
+      const url = URL.createObjectURL(await r.blob()); if (tok !== this.token) { URL.revokeObjectURL(url); return; }
+      const a = this.el(); const old = a.src; a.src = url; if (old.startsWith("blob:")) URL.revokeObjectURL(old);
+      a.onended = () => this.finish(tok); a.onerror = () => this.finish(tok);
+      await a.play();
+    } catch (x) { if (tok === this.token) { this.active = false; this.mark(null); this.onDone = null; chat?.note(`Couldn't read it aloud: ${x.message}`, "err"); } }
+  },
+};
+
+/** Dictation into a chat's message box. `auto`: stop after a pause and send (hands-free / "send when I stop talking"). */
+const Dictation = {
+  on: false, chat: null, rec: null, mic: null,
+  setBtn(state) { const b = this.chat?.micBtn; if (!b) return; b.classList.toggle("rec", state === "rec"); b.classList.toggle("busy", state === "busy"); b.setAttribute("aria-pressed", String(state === "rec")); b.title = state === "rec" ? "Stop listening" : state === "busy" ? "Transcribing…" : "Talk (dictate a message)"; },
+  async toggle(chat, opts = {}) {
+    if (this.on) return this.stop(true);
+    Speech.stop();
+    await Voice.refresh();
+    const mode = Voice.inputMode();
+    if (mode === "setup") return voiceSheet("This browser can record but has no speech recognition of its own. Set up private speech recognition on this computer to use the mic here.");
+    if (!mode) return chat.note("Voice input isn't available in this browser.", "err");
+    this.chat = chat; this.auto = opts.auto ?? VP.on("autosend");
+    return mode === "browser" ? this.startBrowser() : this.startRecorder();
+  },
+  stop(byUser) {
+    if (!this.on) return;
+    this.byUser = !!byUser;
+    if (this.rec) { try { this.rec.stop(); } catch { /* ended */ } }
+    if (this.mic) this.mic.finish(true);
+  },
+  cancel() { if (!this.on) return; this.cancelled = true; this.stop(false); },
+  ended(text) {
+    const c = this.chat; this.on = false; this.rec = null; this.mic = null; this.setBtn("");
+    const cancelled = this.cancelled; this.cancelled = false;
+    if (!c || c.closed || cancelled) return;
+    if ((this.auto || (this.byUser && VP.on("autosend"))) && text && text.trim() && c.input.value.trim()) c.send();
+  },
+  startBrowser() {
+    const c = this.chat, r = new Voice.SR(); this.rec = r; this.on = true; this.byUser = false; this.cancelled = false;
+    r.lang = navigator.language || "en-US"; r.interimResults = true; r.continuous = !this.auto; r.maxAlternatives = 1;
+    const base = c.input.value; let said = "", failed = null;
+    r.onresult = (e) => {
+      let fin = "", interim = "";
+      for (let i = 0; i < e.results.length; i++) { const t = e.results[i][0]?.transcript || ""; if (e.results[i].isFinal) fin += t; else interim += t; }
+      said = (fin + interim).trim(); c.input.value = HV.joinDictation(base, said); c.grow();
+    };
+    r.onerror = (e) => { failed = e.error; };
+    r.onend = () => {
+      if (failed && /^(network|service-not-allowed|language-not-supported|audio-capture)$/.test(failed) && failed !== "audio-capture") {
+        VP.set("srBroken", "1"); // this browser has the API but no working service (e.g. Chromium builds without Google's)
+        this.on = false; this.rec = null; this.setBtn("");
+        if (Voice.caps?.stt?.available && Voice.canRecord) { c.note("This browser's speech recognition isn't working here; using this computer instead (private)."); this.startRecorder(); return; }
+        this.ended(""); return void voiceSheet("This browser's built-in speech recognition isn't working here. Set up private speech recognition on this computer to use the mic.");
+      }
+      if (failed === "not-allowed") c.note("Microphone access is blocked for this site: allow it in the browser's site settings (or tap the mic again).", "err");
+      else if (failed === "audio-capture") c.note("No microphone was found.", "err");
+      this.ended(said);
+    };
+    try { r.start(); this.setBtn("rec"); } catch (x) { this.on = false; this.rec = null; c.note(`Couldn't start listening: ${x.message}`, "err"); }
+  },
+  async startRecorder() {
+    const c = this.chat; this.on = true; this.byUser = false; this.cancelled = false; this.setBtn("rec");
+    const lim = Voice.caps?.limits?.maxSeconds ?? 120;
+    let stream;
+    try { stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } }); }
+    catch (x) { this.on = false; this.setBtn(""); return c.note(x.name === "NotAllowedError" ? "Microphone access is blocked for this site: allow it in the browser's settings, then tap the mic again." : `Couldn't use the microphone: ${x.message}`, "err"); }
+    const AC = window.AudioContext || window.webkitAudioContext, ctx = new AC();
+    try { await ctx.resume(); } catch { /* already running */ }
+    const src = ctx.createMediaStreamSource(stream), proc = ctx.createScriptProcessor(4096, 1, 1);
+    const chunks = []; let total = 0, heard = false, quietSince = 0, floor = null, t0 = Date.now(), done = false;
+    const finish = async (keep) => {
+      if (done) return; done = true;
+      try { proc.disconnect(); src.disconnect(); } catch { /* ignore */ }
+      stream.getTracks().forEach((t) => t.stop()); ctx.close().catch(() => {});
+      if (!keep || this.cancelled || !chunks.length || (this.auto && !heard)) return this.ended("");
+      this.setBtn("busy");
+      const base = c.input.value, ph = base ? " …" : "…";
+      try {
+        const wav = HV.encodeWav(HV.downsample(HV.concat(chunks), ctx.sampleRate, 16000), 16000);
+        c.input.placeholder = "Transcribing…"; if (!base) c.input.value = ""; c.input.value += "";
+        const r = await fetch(`/api/voice/transcribe?lang=${encodeURIComponent((navigator.language || "en").slice(0, 2))}`, { method: "POST", credentials: "same-origin", headers: { "content-type": "audio/wav", "x-hearth-csrf": "1" }, body: wav });
+        const j = await r.json().catch(() => ({}));
+        if (r.status === 423) { showLock(); return this.ended(""); }
+        if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+        if (!c.closed) { c.input.value = HV.joinDictation(c.input.value, j.text); c.grow(); if (!j.text) c.note("Didn't catch that: nothing was recognised."); }
+        this.ended(j.text || "");
+      } catch (x) { c.note(`Couldn't transcribe: ${x.message}`, "err"); this.ended(""); }
+      finally { c.input.placeholder = "Message the agent…"; void ph; }
+    };
+    this.mic = { finish };
+    proc.onaudioprocess = (e) => {
+      if (done) return;
+      const d = new Float32Array(e.inputBuffer.getChannelData(0)); chunks.push(d); total += d.length;
+      const level = HV.rms(d), secs = total / ctx.sampleRate;
+      if (secs < 0.35) { floor = floor == null ? level : Math.min(floor, level); return; }
+      const thr = Math.max(0.012, (floor ?? 0.004) * 3);
+      if (level > thr) { heard = true; quietSince = 0; } else if (!quietSince) quietSince = Date.now();
+      if (secs >= lim - 1) finish(true);
+      else if (this.auto && heard && quietSince && Date.now() - quietSince > 1500) finish(true);
+      else if (this.auto && !heard && Date.now() - t0 > 8000) finish(false);
+    };
+    src.connect(proc); proc.connect(ctx.destination); // a ScriptProcessor only runs while connected (it outputs silence)
+  },
+};
+
+/** Voice settings for this device. */
+async function voiceSheet(why) {
+  const sheet = $("#sheet"); sheet.hidden = false; if (chat) chat.settingsOpen = false;
+  await Voice.refresh(true);
+  const c = Voice.caps, err = h("p", { class: "err" });
+  const toggle = (k, label, meta, onchange) => {
+    const box = h("input", { type: "checkbox", class: "toggle", checked: VP.on(k), "aria-label": label, onchange: () => { VP.set(k, box.checked ? "1" : "0"); onchange?.(box.checked); } });
+    return h("div", { class: "opt" }, h("div", { class: "opt-l" }, h("div", {}, label), meta ? h("div", { class: "meta" }, meta) : null), box);
+  };
+  const select = (k, label, meta, choices, def) => {
+    const sel = h("select", { "aria-label": label, onchange: () => { VP.set(k, sel.value); if (k === "stt") VP.set("srBroken", "0"); voiceSheet(); } }, choices.map(([v, n]) => h("option", { value: v }, n)));
+    sel.value = VP.get(k, def); return h("div", { class: "opt" }, h("div", { class: "opt-l" }, h("div", {}, label), meta ? h("div", { class: "meta" }, meta) : null), sel);
+  };
+  const im = Voice.inputMode(), om = Voice.outputMode();
+  const sttLine = c?.stt?.available ? `This computer: ready (whisper.cpp, ${c.stt.model}).` : c?.stt?.install?.running ? `This computer: setting up (${c.stt.install.step || "working"})…` : `This computer: not set up${c?.stt?.missing?.length ? ` (needs ${c.stt.missing.join(" and ")})` : ""}.`;
+  const body = [h("h2", {}, "Voice"), why ? h("p", {}, why) : null];
+  body.push(h("p", { class: "muted small" }, `Mic here: ${im === "browser" ? "this browser's speech recognition" : im === "computer" ? "recorded here, transcribed on this computer (private)" : im === "setup" ? "needs this computer set up" : "not available in this browser"}. ${sttLine}`));
+  if (Voice.enabled && c && !c.stt.available) {
+    if (c.stt.install?.error) err.textContent = `Setup failed: ${c.stt.install.error}`;
+    const btn = h("button", { class: "primary", disabled: !!c.stt.install?.running || !c.stt.canInstall, onclick: async () => {
+      btn.disabled = true; err.textContent = "";
+      try { await api("POST", "/api/voice/install"); const poll = async () => { const v = await Voice.refresh(true); if (v?.stt?.install?.running) { setTimeout(poll, 3000); } if (!$("#sheet").hidden && $("#sheet .sheet-body.voice")) voiceSheet(); }; setTimeout(poll, 1500); }
+      catch (x) { err.textContent = x.message; btn.disabled = false; }
+    } }, c.stt.install?.running ? "Setting up…" : "Set up private speech recognition on this computer");
+    body.push(btn, h("p", { class: "muted small" }, c.stt.canInstall ? "Installs whisper.cpp with Homebrew if needed and downloads a 60 MB English speech model. Recordings are transcribed on this computer and deleted straight away." : "Needs Homebrew (macOS) or whisper.cpp (Linux) on this computer first; then this downloads the speech model. Or run `hearth voice install` there."));
+  }
+  body.push(err,
+    select("stt", "Speech recognition", "In-browser recognition may send your voice to Apple (Safari) or Google (Chrome). “This computer” keeps it on your own machine.",
+      [["auto", "Automatic"], ["browser", "This browser"], ["computer", "This computer (private)"]], "auto"),
+    toggle("autosend", "Send when I stop talking", "Otherwise the words stay in the box for you to edit, and you tap Send."),
+    toggle("read", "Read replies aloud", "Reads each finished reply on this device (code and tool output are skipped).", () => chat?.renderCtl()),
+    toggle("handsfree", "Hands-free", "After a reply is read, listen again and send when you stop talking. Tap the mic or Stop to end."));
+  const vs = Voice.voices().filter((v) => String(v.lang || "").slice(0, 2) === String(navigator.language || "en").slice(0, 2));
+  if (vs.length) {
+    const best = HV?.pickVoice(vs, navigator.language || "en-US");
+    const sel = h("select", { "aria-label": "Voice", onchange: () => VP.set("voiceURI", sel.value) },
+      h("option", { value: "" }, `Best available${best ? ` (${best.name})` : ""}`),
+      vs.map((v) => h("option", { value: v.voiceURI }, `${v.name}${v.localService === false ? " · online" : ""}`)));
+    sel.value = VP.get("voiceURI", "");
+    body.push(h("div", { class: "opt" }, h("div", { class: "opt-l" }, h("div", {}, "Voice"), h("div", { class: "meta" }, "Premium or Enhanced voices sound best (on Apple devices: Settings → Accessibility → Spoken Content → Voices).")), sel));
+  }
+  body.push(select("tts", "Read aloud with", om ? `Now: ${om === "browser" ? "this browser's voices" : `this computer (${c?.tts?.engine})`}.` : "Not available in this browser.",
+    [["auto", "Automatic"], ["browser", "This browser"], ["computer", "This computer"]], "auto"));
+  body.push(h("div", { class: "row wrap" }, h("button", { onclick: () => { Speech.unlock(); Speech.speak("This is how replies will sound."); } }, ico("volume"), " Test voice"),
+    h("button", { onclick: () => { sheet.hidden = true; } }, "Done")));
+  sheet.replaceChildren(h("div", { class: "sheet-body voice" }, ...body.filter(Boolean)));
+}
+
 // ---------- chat ----------
 class Chat {
   constructor(id) {
@@ -196,11 +439,14 @@ class Chat {
     this.permBox = h("div", { class: "perms" });
     this.input = h("textarea", { rows: 1, placeholder: "Message the agent…", "aria-label": "Message", oninput: () => this.grow(),
       onkeydown: (e) => { if (e.key === "Enter" && !e.shiftKey && !matchMedia("(pointer: coarse)").matches) { e.preventDefault(); this.send(); } } });
-    this.sendBtn = h("button", { class: "primary", onclick: () => this.send() }, "Send");
-    this.stopBtn = h("button", { class: "danger", hidden: true, onclick: () => this.ws?.send(JSON.stringify({ type: "cancel" })) }, "Stop");
+    this.sendBtn = h("button", { class: "primary", onclick: () => { Speech.unlock(); this.send(); } }, "Send");
+    this.stopBtn = h("button", { class: "danger", hidden: true, onclick: () => { Speech.stop(); Dictation.cancel(); this.ws?.send(JSON.stringify({ type: "cancel" })); } }, "Stop");
+    this.micBtn = h("button", { class: "mic", type: "button", hidden: true, "aria-label": "Talk", title: "Talk (dictate a message)", "aria-pressed": "false",
+      onclick: () => { Speech.unlock(); Dictation.toggle(this); } }, ico("mic"));
     this.ctl = h("div", { class: "ctl", hidden: true }); this.options = [];
     this.qBox = h("div", { class: "queue", hidden: true }); this.queue = { items: [], paused: false, reason: null, max: 10 }; this.qEdit = null; this.busy = false;
-    $("#view").replaceChildren(h("div", { class: "chat" }, this.log, this.permBox, h("div", { class: "composer-wrap" }, this.qBox, this.ctl, h("div", { class: "composer" }, this.input, this.stopBtn, this.sendBtn))));
+    $("#view").replaceChildren(h("div", { class: "chat" }, this.log, this.permBox, h("div", { class: "composer-wrap" }, this.qBox, this.ctl, h("div", { class: "composer" }, this.input, this.micBtn, this.stopBtn, this.sendBtn))));
+    Voice.refresh().then(() => { if (!this.closed) { this.micBtn.hidden = !Voice.inputMode(); this.renderCtl(); } });
     this.onVis = () => { if (document.visibilityState === "visible" && (!this.ws || this.ws.readyState > 1)) this.connect(); this.sendVis(); };
     document.addEventListener("visibilitychange", this.onVis);
     addEventListener("focus", this.onVis); addEventListener("blur", this.onVis);
@@ -250,7 +496,7 @@ class Chat {
       this.retryTimer = setTimeout(() => this.connect(), Math.min(1000 * 2 ** this.retry++, 15000));
     };
   }
-  close() { this.closed = true; clearTimeout(this.retryTimer); document.removeEventListener("visibilitychange", this.onVis); removeEventListener("focus", this.onVis); removeEventListener("blur", this.onVis); this.ws?.close(); }
+  close() { if (Dictation.chat === this) Dictation.cancel(); Speech.stop(); this.closed = true; clearTimeout(this.retryTimer); document.removeEventListener("visibilitychange", this.onVis); removeEventListener("focus", this.onVis); removeEventListener("blur", this.onVis); this.ws?.close(); }
   /** Tell the server whether you're looking at this session (it skips notifications for it while you are). */
   sendVis(force) {
     const v = document.visibilityState === "visible" && (typeof document.hasFocus !== "function" || document.hasFocus());
@@ -273,6 +519,7 @@ class Chat {
       this.retry = 0; this.connect();
       return;
     }
+    Speech.stop(); if (Dictation.on && Dictation.chat === this) Dictation.cancel();
     if (this.busy && this.queue.items.length >= this.queue.max) return this.note(`The queue is full (${this.queue.max} prompts). Wait for the agent, or remove a queued prompt.`, "err");
     this.ws.send(JSON.stringify({ type: "prompt", content: [{ type: "text", text }] }));
     this.lastSent = this.busy ? null : text; // a direct send: given back if the agent can't start
@@ -432,7 +679,10 @@ class Chat {
     else if (m.type === "agent_starting") this.starting(true);
     else if (m.type === "agent_ready") this.starting(false);
     else if (m.type === "permission_resolved") { this.perms.get(m.id)?.remove(); this.perms.delete(m.id); }
-    else if (m.type === "prompt_done") { this.cur = null; if (m.stopReason !== "end_turn") this.note(`Stopped: ${m.stopReason}`); }
+    else if (m.type === "prompt_done") {
+      this.cur = null; if (m.stopReason !== "end_turn") this.note(`Stopped: ${m.stopReason}`);
+      else this.readAloud();
+    }
     else if (m.type === "error" && !/^couldn't start the agent/.test(m.message) && /setting|config|mode|model/i.test(m.message) && this.options.length) { this.renderCtl(); this.note(m.message, "err"); }
     else if (m.type === "error") {
       this.starting(false);
@@ -517,7 +767,7 @@ class Chat {
   render(e) {
     const msg = e.msg || {};
     if (e.dir === "out" && msg.method === "session/prompt") {
-      this.cur = null;
+      this.cur = null; this.turnAgentEl = null;
       const blocks = msg.params.prompt || [];
       const el = h("div", { class: "msg user" }, blocks.map((c) => c.text ?? "").join(""));
       for (const c of blocks) { const im = imageOf(c); if (im) el.append(this.figure(im) ?? h("div", {}, `[image: ${im.alt}]`)); }
@@ -539,7 +789,11 @@ class Chat {
     switch (u.sessionUpdate) {
       case "agent_message_chunk": case "user_message_chunk": {
         const role = u.sessionUpdate === "user_message_chunk" ? "user" : "agent";
-        if (!this.cur || this.cur.role !== role) { this.cur = { role, seg: null, el: h("div", { class: `msg ${role} md` }) }; this.log.append(this.cur.el); }
+        if (!this.cur || this.cur.role !== role) {
+          this.cur = { role, seg: null, el: h("div", { class: `msg ${role} md` }) }; this.log.append(this.cur.el);
+          if (role === "agent") { this.cur.el._md = ""; this.cur.el.append(this.sayBtn(this.cur.el)); this.turnAgentEl = this.cur.el; }
+        }
+        if (role === "agent" && u.content?.type === "text") this.cur.el._md += u.content.text ?? "";
         const c = u.content || {}; const im = imageOf(c);
         if (im) {
           const f = this.figure(im);
@@ -571,6 +825,25 @@ class Chat {
       case "current_mode_update": this.note(`Mode: ${u.currentModeId}`); break;
       default: break;
     }
+  }
+  /** Speaker button on an agent reply: read it aloud (tap again to stop). */
+  sayBtn(el) {
+    const b = h("button", { class: "say", type: "button", title: "Read aloud", "aria-label": "Read this reply aloud", onclick: (e) => {
+      e.stopPropagation(); Speech.unlock();
+      if (Speech.speakingEl === el && Speech.active) return Speech.stop();
+      Dictation.cancel(); Speech.speak(el._md || el.textContent, { el });
+    } }, ico("volume"));
+    b.addEventListener("pointerdown", (e) => e.preventDefault()); // keep the keyboard / text focus where it is
+    return b;
+  }
+  /** A turn finished: read its final reply when "Read replies aloud" is on; hands-free listens again afterwards. */
+  readAloud() {
+    const el = this.turnAgentEl;
+    if (!VP.on("read") || !el?.isConnected || !el._md?.trim() || document.visibilityState !== "visible") return;
+    if (Dictation.on) return; // you're already talking
+    Speech.speak(el._md, { el, done: (natural) => {
+      if (natural && VP.on("handsfree") && !this.closed && chat === this && !this.busy && !Dictation.on && Voice.inputMode() && Voice.inputMode() !== "setup") Dictation.toggle(this, { auto: true });
+    } });
   }
   /** Text goes into the message's current text segment (an image block ends the segment, so text after it follows it). */
   addText(t) {
@@ -630,9 +903,14 @@ class Chat {
     };
     const main = ["model", "mode"].map((c) => opts.find((o) => o.category === c && o.type === "select")).filter(Boolean);
     const rest = opts.filter((o) => !main.includes(o));
-    this.ctl.replaceChildren(...main.map(pill),
+    const out = Voice.outputMode() != null, on = VP.on("read");
+    const read = out ? h("button", { class: `pillbtn readtg${on ? " on" : ""}`, "aria-pressed": String(on), "aria-label": "Read replies aloud",
+      title: on ? "Reading replies aloud (tap to stop)" : "Read replies aloud", onclick: () => {
+        const v = !VP.on("read"); VP.set("read", v ? "1" : "0"); Speech.unlock(); if (!v) Speech.stop(); this.renderCtl();
+      } }, ico(on ? "volume" : "volumeOff")) : null;
+    this.ctl.replaceChildren(...(read ? [read] : []), ...main.map(pill),
       ...(rest.length ? [h("button", { class: "pillbtn", "aria-label": "More settings", title: "More settings", onclick: () => this.openSettings() }, ico("sliders"), ` ${rest.length}`)] : []));
-    this.ctl.hidden = !opts.length;
+    this.ctl.hidden = !opts.length && !read;
   }
   openSettings() {
     this.settingsOpen = true;
@@ -791,6 +1069,7 @@ $("#menu").onclick = () => {
   sheet.replaceChildren(h("div", { class: "sheet-body" }, h("h2", {}, "Session"),
     h("label", {}, "Name"), name,
     h("button", { onclick: async () => { await api("PATCH", `/api/sessions/${id}`, { title: name.value }); sheet.hidden = true; } }, "Rename"),
+    HV ? h("button", { onclick: () => voiceSheet() }, ico("mic"), " Voice settings") : null,
     h("button", { class: "danger", onclick: async () => { if (confirm("Stop this agent? History is kept.")) { await api("DELETE", `/api/sessions/${id}`); sheet.hidden = true; } } }, "Terminate"),
     h("button", { class: "danger", onclick: async () => { if (confirm("Stop the agent and delete all history for this session?")) { await api("DELETE", `/api/sessions/${id}?purge=1`); sheet.hidden = true; location.hash = "#/"; } } }, "Terminate & delete history"),
     h("button", { onclick: () => { sheet.hidden = true; } }, "Close")));
@@ -992,6 +1271,7 @@ async function route() {
     if (fm) { let p = ""; try { p = decodeURIComponent(fm[1] || ""); } catch { /* bad escape */ } await showFiles(p); }
     else if (m) {
       const me = await api("GET", "/api/me"); if (me.needsPassword && !me.unlocked) return showLock();
+      Voice.enabled = !!me.voice;
       if (!agents.length) agents = await api("GET", "/api/agents");
       const s = await api("GET", `/api/sessions/${m[1]}`);
       if (chat) chat.close();

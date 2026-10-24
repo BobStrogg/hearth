@@ -162,6 +162,7 @@ serve((conn) => ({
       const exit = await t.waitForExit(); const out = await t.currentOutput(); await t.release();
       await say(`terminal said ${out.output.trim()} (exit ${exit.exitCode})`);
     }
+    if (text.includes("codeblock")) await say("Here is the fix:\n\n```js\nconst a = 1;\n```\n\nAll done. ");
     if (text.includes("stream")) {
       for (const w of ["one ", "two ", "three ", "four "]) { await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "t" } } }); await say(w); await new Promise((r) => setTimeout(r, 150)); }
     }

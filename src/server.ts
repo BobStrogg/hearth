@@ -16,6 +16,7 @@ import { cmpVer, latestRelease, plan, type Release, spawnUpdater } from "./updat
 import { VERSION } from "./version.js";
 import { checkFolder, LiveSession, within } from "./session.js";
 import { Files, FilesError, readError } from "./files.js";
+import { MAX_AUDIO_BYTES, Voice, VoiceError } from "./voice.js";
 import { DEFAULT_PUSH_HOSTS, endpointOk, Push, replyTail, snippet, validSubscription } from "./push.js";
 const HISTORY_TURNS = 8;
 import { dedupeFanout, type SessionMeta, Store } from "./store.js";
@@ -40,6 +41,8 @@ export interface Config extends AuthConfig {
   push: boolean;
   pushSubject?: string;
   pushHosts: string[];
+  /** Voice on this computer: speech to text (whisper.cpp) and text to speech for browsers that can't. HEARTH_VOICE=off disables it. */
+  voice: boolean;
 }
 
 export function configFromEnv(env = process.env): Config {
@@ -59,6 +62,7 @@ export function configFromEnv(env = process.env): Config {
     queueCheckMs: Math.max(50, Number(env.HEARTH_QUEUE_CHECK_MS) || 15000),
     push: !/^(off|0|false|no)$/i.test(env.HEARTH_PUSH ?? ""),
     pushSubject: env.HEARTH_PUSH_SUBJECT || undefined,
+    voice: !/^(off|0|false|no)$/i.test(env.HEARTH_VOICE ?? ""),
     pushHosts: [...DEFAULT_PUSH_HOSTS, ...list(env.HEARTH_PUSH_HOSTS).map((h) => h.toLowerCase())],
     identity: env.HEARTH_IDENTITY ?? "single:",
     cfTeamDomain: env.HEARTH_CF_TEAM_DOMAIN, cfAud: env.HEARTH_CF_AUD,
@@ -93,7 +97,7 @@ function webAsset(webDir: string, rel: string): Buffer | null {
 const MIME: Record<string, string> = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".json": "application/json", ".webmanifest": "application/manifest+json" };
 const SEC_HEADERS = {
   "x-content-type-options": "nosniff", "referrer-policy": "no-referrer", "x-frame-options": "DENY",
-  "content-security-policy": "default-src 'self'; connect-src 'self'; img-src 'self' data: blob: https:; style-src 'self'; script-src 'self'; frame-ancestors 'none'",
+  "content-security-policy": "default-src 'self'; connect-src 'self'; img-src 'self' data: blob: https:; media-src 'self' blob:; style-src 'self'; script-src 'self'; frame-ancestors 'none'",
 };
 /** Image types the session-file endpoint will serve (by extension, confirmed by magic bytes). */
 const IMAGE_TYPES: Record<string, string> = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp", ".avif": "image/avif", ".svg": "image/svg+xml" };
@@ -119,7 +123,7 @@ export class Hearth {
   private deepCache = new Map<string, unknown>();
   private rel: { at: number; release?: Release; error?: string } = { at: 0 };
   private updating = 0; private pendingSince = 0; private autoTimer?: NodeJS.Timeout;
-  files: Files | null = null; push: Push | null = null;
+  files: Files | null = null; push: Push | null = null; voice: Voice | null = null;
   /** Agent process groups started by this Hearth (see orphans.ts). */
   readonly agentPids: AgentPids;
   /** Sockets currently looking at a session (tab visible and focused): no push for that session while > 0. */
@@ -130,6 +134,7 @@ export class Hearth {
     this.auth = new Auth(cfg);
     this.agents = loadAgents(cfg.agentsFile);
     if (cfg.files) { try { this.files = new Files(cfg.filesRoot, { timeoutMs: cfg.filesTimeoutMs }); } catch { this.files = null; } }
+    if (cfg.voice) this.voice = new Voice(cfg.dataDir);
     if (cfg.push) {
       // VAPID "sub" must be a mailto: or https: contact; default to this server's public origin.
       const subject = cfg.pushSubject || cfg.allowedOrigins.find((o) => o.startsWith("https://")) || "https://github.com/BobStrogg/hearth";
@@ -281,7 +286,7 @@ export class Hearth {
     const mutating = q.method !== "GET" && q.method !== "HEAD";
     if (mutating && !this.auth.csrfOk(q)) return this.send(s, 403, { error: "csrf/origin check failed" });
 
-    if (url.pathname === "/api/me") return this.send(s, 200, { user: who, needsPassword: this.auth.needsPassword, unlocked: this.auth.unlocked(q, who), files: !!this.files, push: !!this.push });
+    if (url.pathname === "/api/me") return this.send(s, 200, { user: who, needsPassword: this.auth.needsPassword, unlocked: this.auth.unlocked(q, who), files: !!this.files, push: !!this.push, voice: !!this.voice });
     if (url.pathname === "/api/unlock" && q.method === "POST") {
       const b = await this.body(q);
       if (!(await this.auth.checkPassword(who, String(b.password ?? "")))) return this.send(s, 403, { error: "wrong password" });
@@ -291,6 +296,7 @@ export class Hearth {
 
     if (url.pathname.startsWith("/api/files")) return this.filesApi(q, s, url);
     if (url.pathname.startsWith("/api/push")) return this.pushApi(q, s, url, who);
+    if (url.pathname.startsWith("/api/voice")) return this.voiceApi(q, s, url);
     if (url.pathname === "/api/version" && q.method === "GET") return this.send(s, 200, await this.versionInfo(url.searchParams.get("check") === "1"));
     if (url.pathname === "/api/update" && q.method === "POST") {
       // Runs the fixed `hearth update --yes` command as a detached process; takes no input.
@@ -439,6 +445,59 @@ export class Hearth {
       return this.send(s, ok ? 200 : 502, { ok, statuses: r });
     }
     return this.send(s, 404, { error: "not found" });
+  }
+
+  /**
+   * Voice: GET /api/voice (what this computer can do), POST /api/voice/transcribe (16-bit PCM WAV body, capped),
+   * POST /api/voice/speak ({ text }) and POST /api/voice/install (fixed setup steps, no input). Behind the same
+   * identity, unlock and CSRF checks as the rest of /api; audio never leaves this computer.
+   */
+  private async voiceApi(q: IncomingMessage, s: ServerResponse, url: URL) {
+    const v = this.voice;
+    if (!v) return this.send(s, 404, { error: "voice is turned off on this computer (HEARTH_VOICE=off)" });
+    try {
+      if (url.pathname === "/api/voice" && q.method === "GET") return this.send(s, 200, v.caps());
+      if (url.pathname === "/api/voice/transcribe" && q.method === "POST") {
+        if (!/^audio\/(wav|x-wav|wave)$/i.test(String(q.headers["content-type"] ?? "").split(";")[0].trim())) return this.send(s, 415, { error: "send audio/wav" });
+        const len = Number(q.headers["content-length"] ?? NaN);
+        if (len > MAX_AUDIO_BYTES) { q.resume(); return this.send(s, 413, { error: "recording too large" }); }
+        const buf = await this.rawBody(q, MAX_AUDIO_BYTES);
+        if (!buf) return this.send(s, 413, { error: "recording too large" });
+        const lang = (url.searchParams.get("lang") ?? "").slice(0, 2).toLowerCase();
+        return this.send(s, 200, await v.transcribe(buf, lang));
+      }
+      if (url.pathname === "/api/voice/speak" && q.method === "POST") {
+        const b = await this.body(q);
+        const r = await v.speak(String(b.text ?? ""));
+        s.writeHead(200, { ...SEC_HEADERS, "content-type": r.type, "content-length": String(r.body.length), "cache-control": "no-store" });
+        return s.end(r.body);
+      }
+      if (url.pathname === "/api/voice/install" && q.method === "POST") {
+        const c = v.caps();
+        if (c.stt.available) return this.send(s, 200, { ok: true, already: true });
+        if (!c.stt.canInstall) return this.send(s, 409, { error: process.platform === "darwin" ? "Homebrew isn't installed on this computer: install it from https://brew.sh, or run `brew install whisper-cpp` yourself" : "install whisper.cpp (whisper-cli) on this computer first; Hearth then downloads the speech model" });
+        return this.send(s, 202, { ok: true, install: v.startInstall((m) => console.log(`voice: ${m}`)) });
+      }
+      return this.send(s, 404, { error: "not found" });
+    } catch (e) {
+      if (e instanceof VoiceError) return this.send(s, e.status, { error: e.message });
+      console.error(`voice: ${url.pathname}: ${(e as Error)?.message ?? e}`);
+      return this.send(s, 500, { error: String((e as Error)?.message ?? e) });
+    }
+  }
+  /** A request body as bytes, or null once it passes `max` (or takes longer than `ms`). Past the cap the rest is read
+   *  and dropped (so the 413 still reaches the browser), up to 4x the cap; then the connection is cut. */
+  private async rawBody(q: IncomingMessage, max: number, ms = 60_000): Promise<Buffer | null> {
+    let n = 0; const chunks: Buffer[] = []; let over = false;
+    const timer = setTimeout(() => { over = true; q.destroy(); }, ms);
+    try {
+      for await (const c of q) {
+        n += c.length;
+        if (n > max) { over = true; chunks.length = 0; if (n > 4 * max) { q.destroy(); break; } continue; }
+        chunks.push(c as Buffer);
+      }
+    } catch { over = true; } finally { clearTimeout(timer); }
+    return over ? null : Buffer.concat(chunks);
   }
 
   /**

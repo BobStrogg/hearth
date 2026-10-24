@@ -8,6 +8,7 @@ import { configFromEnv } from "./server.js";
 import { serviceManager } from "./service.js";
 import { cmpVer, latestRelease, plan } from "./update.js";
 import { VERSION } from "./version.js";
+import { Voice } from "./voice.js";
 
 type Level = "ok" | "warn" | "fail" | "info";
 export interface Check { level: Level; title: string; fix?: string }
@@ -87,6 +88,13 @@ export async function doctor(opts: { online?: boolean } = {}): Promise<Check[]> 
       else add("warn", "Runs Hearth directly: macOS may ask for folder permission (Documents, Desktop…) again after each Node.js or Hearth update, and agents wait until someone clicks Allow", "`hearth service install` (needs the Xcode Command Line Tools: `xcode-select --install`)");
     }
   }
+
+  // voice (optional)
+  if (cfg.voice) {
+    const vc = new Voice(cfg.dataDir).caps();
+    add("info", `Voice on this computer: speech to text ${vc.stt.available ? `ready (whisper.cpp, ${vc.stt.model})` : "not set up"}; text to speech ${vc.tts.engine ?? "none"}`,
+      vc.stt.available ? undefined : "Optional, for the mic button in browsers without built-in speech recognition (e.g. the Tesla browser) or to keep dictation private: `hearth voice install`.");
+  } else add("info", "Voice on this computer: off (HEARTH_VOICE=off)");
 
   // updates
   const auto = (process.env.HEARTH_AUTO_UPDATE ?? "off").toLowerCase();
