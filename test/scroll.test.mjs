@@ -75,10 +75,14 @@ test("opens on the tail, pages older history on scroll keeping position, ends at
 
 test("a short tail that doesn't fill the screen auto-loads more", { skip: !CHROME && "no Chrome" }, async () => {
   const id = await session(30, false);
-  const page = await browser.newPage(); await page.setViewport({ width: 390, height: 900 });
+  // tall enough that the first page (8 short turns) can't fill it even with the voice controls showing
+  const page = await browser.newPage(); await page.setViewport({ width: 390, height: 1100 });
+  // as on a Mac, where Chrome has speech voices: the read-aloud pill and the reply speakers are shown (taller layout)
+  await page.evaluateOnNewDocument(() => { window.SpeechSynthesisUtterance = class {}; Object.defineProperty(window, "speechSynthesis", { configurable: true, value: { speak() {}, cancel() {}, getVoices: () => [{ name: "V", lang: "en-US", localService: true, voiceURI: "v" }], addEventListener() {} } }); });
   await page.goto(`${base}/#/s/${id}`);
   await page.waitForFunction(() => document.querySelector(".histtop")?.textContent === "Beginning of conversation" || document.querySelector(".log").scrollHeight > document.querySelector(".log").clientHeight + 200, { timeout: 20000 });
   const u = await users(page);
+  console.log("DBG", await page.evaluate(() => { const l = document.querySelector(".log"); return [l.scrollHeight, l.clientHeight, document.querySelectorAll(".msg.user").length, document.querySelector(".msg.agent").getBoundingClientRect().height, getComputedStyle(document.querySelector(".ctl")).display]; }));
   assert.ok(u.length > 8, `loaded more than the first page (${u.length})`);
   await page.close();
 });
