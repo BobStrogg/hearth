@@ -82,7 +82,6 @@ test("a short tail that doesn't fill the screen auto-loads more", { skip: !CHROM
   await page.goto(`${base}/#/s/${id}`);
   await page.waitForFunction(() => document.querySelector(".histtop")?.textContent === "Beginning of conversation" || document.querySelector(".log").scrollHeight > document.querySelector(".log").clientHeight + 200, { timeout: 20000 });
   const u = await users(page);
-  console.log("DBG", await page.evaluate(() => { const l = document.querySelector(".log"); return [l.scrollHeight, l.clientHeight, document.querySelectorAll(".msg.user").length, document.querySelector(".msg.agent").getBoundingClientRect().height, getComputedStyle(document.querySelector(".ctl")).display]; }));
   assert.ok(u.length > 8, `loaded more than the first page (${u.length})`);
   await page.close();
 });
