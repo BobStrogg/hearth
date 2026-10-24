@@ -7,7 +7,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { askGoose, backendEntry, discoverVariants, restoreVariant, saveVariant, setUp, slug } from "../dist/variants.js";
+import { askGoose, backendEntry, customBaseUrl, discoverVariants, modelsUrl, restoreVariant, saveVariant, setUp, slug } from "../dist/variants.js";
+import { createServer } from "node:http";
 import { resolveLaunch } from "../dist/agents.js";
 import { Hearth, configFromEnv } from "../dist/server.js";
 
@@ -84,6 +85,38 @@ test("Goose over ACP: set-up providers become entries; its default one hides the
   const { agent: a3 } = fakeGoose("old", { entries: [], noExtension: true });
   assert.equal(await askGoose(a3, []), null);
   assert.deepEqual((await discoverVariants(a3)).entries, []);
+});
+
+test("custom providers as the home setup writes them: an auth-command one (no key field) is listed; one on this machine only while it answers, and a profile for the same server gives way", { skip: win }, async () => {
+  const saved = process.env.XDG_CONFIG_HOME; delete process.env.XDG_CONFIG_HOME;
+  const home = join(root, "home-setup"); const cp = join(home, ".config", "goose", "custom_providers"); mkdirSync(cp, { recursive: true });
+  const srv = createServer((q, r) => { r.statusCode = q.url === "/v1/models" ? 200 : 404; r.end("{}"); });
+  await new Promise((ok) => srv.listen(0, "127.0.0.1", ok)); const port = srv.address().port;
+  // Goose 1.56.0 reports neither of these with a primary key: an `auth` command, and `requires_auth: false`.
+  const noKey = [{ name: "OPENAI_HOST", required: true, secret: false, primary: false }];
+  const entries = [
+    { providerId: "home_cf", providerName: "Cloudflare Workers AI (home, free tier)", providerType: "Custom", defaultModel: "@cf/zai-org/glm-4.7-flash", configKeys: noKey, models: [{ id: "@cf/zai-org/glm-4.7-flash", contextLimit: 131072 }] },
+    { providerId: "home_fm", providerName: "Apple on-device model (fm serve, private)", providerType: "Custom", defaultModel: "system", configKeys: noKey, models: [{ id: "system", contextLimit: 4096 }] },
+  ];
+  writeFileSync(join(cp, "home_cf.json"), JSON.stringify({ name: "home_cf", engine: "openai", base_url: "https://ai.example.invalid/v1", auth: { command: "/bin/sh", args: ["-c", `touch "${join(home, "AUTH_RAN")}"`] }, models: [] }));
+  writeFileSync(join(cp, "home_fm.json"), JSON.stringify({ name: "home_fm", engine: "openai", base_url: `http://127.0.0.1:${port}/v1`, requires_auth: false, models: [] }));
+  writeFileSync(join(cp, "broken.json"), "{");
+  assert.equal(customBaseUrl("home_fm", home), `http://127.0.0.1:${port}/v1`); assert.equal(customBaseUrl("nope", home), undefined);
+  assert.equal(modelsUrl("http://h/v1/"), "http://h/v1/models"); assert.equal(modelsUrl("http://h/v1/chat/completions"), "http://h/v1/models");
+  // A Goose with a profile for the same local server (fm-serve-goose's config.example.yaml).
+  const { agent } = fakeGoose("setup", { entries, config: { GOOSE_PROVIDER: "home_cf" } });
+  const repo = join(home, "fm"); mkdirSync(repo, { recursive: true });
+  writeFileSync(join(repo, "config.example.yaml"), `GOOSE_PROVIDER: openai\nOPENAI_HOST: http://127.0.0.1:${port}\n`);
+  const a = { ...agent, detect: [agent.command], profiles: [{ name: "fm serve", bin: agent.command, envFile: join(repo, "config.example.yaml"), healthUrl: "${OPENAI_HOST}/v1/models" }] };
+  try {
+    const up = await discoverVariants(a, { home });
+    assert.deepEqual(up.entries.map((e) => e.id), ["fg.home_fm", "fg.home_cf"], "the profile gives way to Goose's own definition of the same server");
+    assert.equal(up.coversDefault, true);
+    await new Promise((ok) => srv.close(ok));
+    const down = await discoverVariants(a, { home });
+    assert.deepEqual(down.entries.map((e) => e.id), ["fg.home_cf"], "fm serve's proxy stopped: not offered");
+    assert.equal(readdirSync(home).includes("AUTH_RAN"), false, "Hearth never runs a provider's auth command");
+  } finally { srv.close(); if (saved !== undefined) process.env.XDG_CONFIG_HOME = saved; }
 });
 
 let h, base, dataDir, fg;

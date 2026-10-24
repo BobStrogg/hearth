@@ -4,10 +4,12 @@
 // choosing a model within a backend stays the agent's own ACP Model option. No secrets are read: Goose only says
 // whether a provider's key is set.
 import { spawn } from "node:child_process";
+import { readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
+import { join } from "node:path";
 import { Readable, Writable } from "node:stream";
 import * as acp from "./acp.js";
-import { type AgentDef, findAgent, matchProfile, profileProblem, resolveLaunch, searchPath, winShell } from "./agents.js";
+import { answers, type AgentDef, findAgent, healthUrlFor, localUrl, matchProfile, profileProblem, resolveLaunch, searchPath, winShell } from "./agents.js";
 
 /** A picker id segment: lower case letters, digits, "_" and "-" (Hearth's agent ids are [a-z0-9_.-]). */
 export const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48) || "x";
@@ -91,6 +93,24 @@ export async function askGoose(a: AgentDef, configKeys: string[], timeoutMs = 10
   }
 }
 
+/**
+ * Where a custom Goose provider points (its `base_url`), read from Goose's custom_providers folder (only that field;
+ * an `auth` command is never run or read by Hearth). undefined when its file isn't found there.
+ */
+export function customBaseUrl(id: string, home = homedir()): string | undefined {
+  const dirs = [...new Set([process.env.XDG_CONFIG_HOME, join(home, ".config")].filter(Boolean).map((d) => join(d!, "goose", "custom_providers")))];
+  for (const d of dirs) {
+    let files: string[]; try { files = readdirSync(d).filter((f) => f.endsWith(".json")); } catch { continue; }
+    for (const f of files) {
+      try { const j = JSON.parse(readFileSync(join(d, f), "utf8")); if (j?.name === id && typeof j.base_url === "string") return j.base_url; } catch { /* not ours */ }
+    }
+  }
+  return undefined;
+}
+/** An OpenAI-style base URL's model list ("http://127.0.0.1:1977/v1" → ".../v1/models"). */
+export const modelsUrl = (base: string) => base.replace(/\/+$/, "").replace(/\/chat\/completions$/, "") + "/models";
+const origin = (u: string | undefined) => { try { return u ? new URL(u).origin : undefined; } catch { return undefined; } };
+
 export interface Variants {
   /** Ready derived entries, profiles first. */
   entries: AgentDef[];
@@ -115,6 +135,20 @@ export async function discoverVariants(a: AgentDef, opts: { home?: string; ask?:
     const keys = new Set<string>(["GOOSE_PROVIDER", "GOOSE_CONTEXT_LIMIT", ...profs.flatMap((x) => Object.keys(x.env))]);
     const r = await ask(a, [...keys]).catch(() => null);
     if (r) ({ backends, config } = r);
+  }
+  // A custom provider on this machine (e.g. Goose's own definition of the fm serve proxy) is listed only while it
+  // answers; a profile for the same local server gives way to it (one entry, Goose's own).
+  const local = new Set<string>();
+  const ready: Backend[] = [];
+  for (const b of backends) {
+    const base = customBaseUrl(b.id, home);
+    if (base && localUrl(base)) { local.add(origin(base)!); if (!(await answers(modelsUrl(base)))) continue; }
+    ready.push(b);
+  }
+  backends = ready;
+  for (let i = profs.length - 1; i >= 0; i--) {
+    const p = a.profiles?.find((x) => x.name === profs[i].def.profile);
+    if (p && local.has(origin(healthUrlFor(p, profs[i].env)) ?? "")) profs.splice(i, 1);
   }
   const dflt = a.env?.GOOSE_PROVIDER ?? config.GOOSE_PROVIDER;
   const entries = profs.map((x) => x.def);
