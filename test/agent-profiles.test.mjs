@@ -1,5 +1,6 @@
 // Agent discovery beyond the PATH: "~/" detect paths, and per-install profiles (e.g. Goose set up for a local model
-// through fm-serve-goose) whose settings apply only while that install's health URL answers.
+// through fm-serve-goose): each is its own picker entry while that install's health URL answers; the plain agent always
+// starts with its own config.
 import { strict as assert } from "node:assert";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
@@ -8,6 +9,7 @@ import { delimiter, dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { BUILTIN_AGENTS, deepProbe, expandHome, localUrl, matchProfile, probe, readEnvFile, resolveLaunch } from "../dist/agents.js";
+import { discoverVariants, profileEntry } from "../dist/variants.js";
 
 const win = process.platform === "win32";
 const MOCK = join(dirname(fileURLToPath(import.meta.url)), "mock-agent.mjs");
@@ -56,7 +58,9 @@ async function freePort() { const s = await healthServer(); const p = s.address(
 
 test("builtin Goose: `goose acp`, also found where fm-serve-goose installs it, with that install's profile", () => {
   const g = BUILTIN_AGENTS.find((a) => a.id === "goose");
-  assert.equal(g.command, "goose"); assert.deepEqual(g.args, ["acp"]);
+  assert.equal(g.command, "goose"); assert.deepEqual(g.args, ["acp"]); assert.equal(g.discover, "goose-providers");
+  assert.equal(g.profiles[0].name, "on-Mac (fm serve)");
+  assert.equal(profileEntry(g, g.profiles[0].name).id, "goose.on-mac-fm-serve"); assert.equal(profileEntry(g, g.profiles[0].name).name, "Goose · on-Mac (fm serve)");
   assert.ok(g.detect.includes("goose") && g.detect.includes("~/Developer/fm-serve-goose/bin/goose"));
   const p = g.profiles[0];
   assert.equal(p.bin, "~/Developer/fm-serve-goose/bin/goose");
@@ -83,30 +87,42 @@ test("not installed: not listed as installed, no profile, the plain command", { 
   assert.equal(l.command, NAME); assert.deepEqual(l.env, {}); assert.equal(l.profile, undefined);
 });
 
-test("found only at its ~/ path: launched from there; the profile's env only while its health URL answers", { skip: win }, async () => {
+test("found only at its ~/ path: launched from there; its profile is its own entry, only while its health URL answers", { skip: win }, async () => {
   const bin = fakeAgent(join(repo, "bin", NAME), "a");
   const srv = await healthServer(); const port = srv.address().port;
   try {
     const a = profileAgent(port);
     const [p] = probe([a]);
     assert.equal(p.installed, true); assert.equal(p.path, bin); assert.equal(p.profile, "fm serve");
-    const up = await resolveLaunch(a);
-    assert.equal(up.command, bin); assert.equal(up.profile, "fm serve"); assert.equal(up.note, undefined);
+    // The plain agent: that binary, its own config.
+    const plain = await resolveLaunch(a);
+    assert.equal(plain.command, bin); assert.equal(plain.profile, undefined); assert.deepEqual(plain.env, {});
+    // The profile's entry: the repo's settings.
+    const v = await discoverVariants(a, { home });
+    assert.deepEqual(v.entries.map((e) => [e.id, e.name, e.parent, e.profile]), [["tg.fm-serve", "Test Goose · fm serve", "tg", "fm serve"]]);
+    assert.equal(v.coversDefault, false, "not a provider-discovering agent: nothing says what its own config is");
+    const fe = v.entries[0];
+    const up = await resolveLaunch(fe);
+    assert.equal(up.command, bin); assert.equal(up.profile, "fm serve");
     assert.deepEqual(up.env, { GOOSE_PROVIDER: "openai", GOOSE_MODEL: "system", OPENAI_HOST: `http://127.0.0.1:${port}`, OPENAI_BASE_PATH: "v1/chat/completions", GOOSE_CONTEXT_LIMIT: "4096" });
     // Hearth's own env for the agent (agents.json) still wins.
-    assert.equal((await resolveLaunch({ ...a, env: { GOOSE_MODEL: "mine" } })).env.GOOSE_MODEL, "mine");
+    assert.equal((await resolveLaunch(profileEntry({ ...a, env: { GOOSE_MODEL: "mine" } }, "fm serve"))).env.GOOSE_MODEL, "mine");
     // A real start: the agent sees the settings and answers initialize.
-    const d = await deepProbe(a, 15000);
+    const d = await deepProbe(fe, 15000);
     assert.equal(d.ok, true, d.error); assert.equal(d.agentName, "mock-agent"); assert.equal(d.profile, "fm serve");
     assert.equal(envOf("a").OPENAI_HOST, `http://127.0.0.1:${port}`); assert.equal(envOf("a").GOOSE_PROVIDER, "openai");
+    const d2 = await deepProbe(a, 15000);
+    assert.equal(d2.ok, true, d2.error); assert.equal(d2.profile, undefined); assert.equal(envOf("a").GOOSE_PROVIDER, undefined);
   } finally { await new Promise((ok) => srv.close(ok)); }
-  // The proxy isn't running (e.g. no fm serve before macOS 27): same binary, its own config, and a note why.
+  // The proxy isn't running (e.g. no fm serve before macOS 27): no entry, and starting one says why (never quietly
+  // starts without the settings).
   const a = profileAgent(await freePort());
-  const down = await resolveLaunch(a);
-  assert.equal(down.command, bin); assert.equal(down.profile, undefined); assert.deepEqual(down.env, {});
-  assert.match(down.note, /fm serve: http:\/\/127\.0\.0\.1:\d+\/v1\/models didn't answer, so Test Goose uses its own config/);
-  const d = await deepProbe(a, 15000);
-  assert.equal(d.ok, true, d.error); assert.equal(d.profile, undefined); assert.equal(envOf("a").GOOSE_PROVIDER, undefined);
+  assert.deepEqual((await discoverVariants(a, { home })).entries, []);
+  const fe = profileEntry(a, "fm serve");
+  await assert.rejects(resolveLaunch(fe), /Test Goose · fm serve: http:\/\/127\.0\.0\.1:\d+\/v1\/models didn't answer; start it/);
+  const d = await deepProbe(fe, 15000);
+  assert.equal(d.ok, false); assert.match(d.error, /didn't answer/);
+  assert.deepEqual((await resolveLaunch(a)).env, {}, "the plain agent is unaffected");
 });
 
 test("a symlink on the PATH (~/.local/bin) to that install still gets its profile; another install never does", { skip: win }, async () => {
@@ -118,22 +134,28 @@ test("a symlink on the PATH (~/.local/bin) to that install still gets its profil
   try {
     const a = profileAgent(srv.address().port);
     process.env.PATH = `${dirname(link)}${delimiter}${saved}`;
-    const l = await resolveLaunch(a);
+    const l = await resolveLaunch(profileEntry(a, "fm serve"));
     assert.equal(l.profile, "fm serve"); assert.equal(l.command, link); assert.equal(l.env.GOOSE_MODEL, "system");
-    // A different goose comes first on the PATH (say Homebrew's): that one is used, with the user's own config.
+    assert.equal((await discoverVariants(a, { home })).entries.length, 1);
+    // A different goose comes first on the PATH (say Homebrew's): that one is used, with the user's own config, and
+    // the profile isn't offered (it describes the other install).
     process.env.PATH = `${dirname(other)}${delimiter}${dirname(link)}${delimiter}${saved}`;
     const [p] = probe([a]); assert.equal(p.path, other); assert.equal(p.profile, undefined);
     const o = await resolveLaunch(a);
-    assert.equal(o.command, NAME); assert.equal(o.profile, undefined); assert.deepEqual(o.env, {}); assert.equal(o.note, undefined);
+    assert.equal(o.command, NAME); assert.equal(o.profile, undefined); assert.deepEqual(o.env, {});
     assert.equal(matchProfile(a, other), null);
+    assert.deepEqual((await discoverVariants(a, { home })).entries, []);
+    await assert.rejects(resolveLaunch(profileEntry(a, "fm serve")), /isn't there \(or isn't the hearth-test-goose found\)/);
   } finally { process.env.PATH = saved; await new Promise((ok) => srv.close(ok)); }
 });
 
-test("a profile whose config file is gone doesn't apply", { skip: win }, async () => {
+test("a profile whose config file is gone isn't offered", { skip: win }, async () => {
   const a = profileAgent(1); a.profiles[0].envFile = "~/Developer/fake-fm/nope.yaml";
   fakeAgent(join(repo, "bin", NAME), "d");
   assert.equal(probe([a])[0].profile, undefined);
-  const l = await resolveLaunch(a); assert.equal(l.profile, undefined); assert.equal(l.note, undefined);
+  assert.deepEqual((await discoverVariants(a, { home })).entries, []);
+  const l = await resolveLaunch(a); assert.equal(l.profile, undefined); assert.deepEqual(l.env, {});
+  await assert.rejects(resolveLaunch(profileEntry(a, "fm serve")), /nope\.yaml isn't there/);
 });
 
 test("an agent whose command isn't found is never started as a different detect binary", { skip: win }, async () => {
@@ -143,7 +165,7 @@ test("an agent whose command isn't found is never started as a different detect 
   assert.equal((await resolveLaunch(a)).command, "hearth-test-missing-npx");
 });
 
-test("health URLs: loopback only, the launch's own host, and never credentials in notes", { skip: win }, async () => {
+test("health URLs: loopback only, the launch's own host, and never credentials in messages", { skip: win }, async () => {
   assert.ok(localUrl("http://127.0.0.1:1/x") && localUrl("http://localhost:1/") && localUrl("http://[::1]:1/"));
   assert.equal(localUrl("http://example.com/v1/models"), null); assert.equal(localUrl("file:///etc/passwd"), null); assert.equal(localUrl("nope"), null);
   fakeAgent(join(repo, "bin", NAME), "f");
@@ -151,12 +173,15 @@ test("health URLs: loopback only, the launch's own host, and never credentials i
   try {
     // agents.json moves OPENAI_HOST to the live server: that host is checked (and used), not the file's dead one.
     const a = { ...profileAgent(await freePort()), env: { OPENAI_HOST: `http://127.0.0.1:${port}` } };
-    const l = await resolveLaunch(a); assert.equal(l.profile, "fm serve"); assert.equal(l.env.OPENAI_HOST, `http://127.0.0.1:${port}`);
-    // A remote host is never contacted, and the note shows no user, password or query.
-    const r = await resolveLaunch({ ...a, env: { OPENAI_HOST: "http://user:secret@example.com" } });
-    assert.equal(r.profile, undefined); assert.match(r.note, /http:\/\/example\.com\/v1\/models isn't a local http\(s\) URL/); assert.doesNotMatch(r.note, /secret|user/);
-    const q = await resolveLaunch({ ...a, profiles: [{ ...a.profiles[0], healthUrl: "http://u:pw@127.0.0.1:1/h?token=abc" }] });
-    assert.doesNotMatch(q.note, /pw|token|abc/);
+    const l = await resolveLaunch(profileEntry(a, "fm serve")); assert.equal(l.profile, "fm serve"); assert.equal(l.env.OPENAI_HOST, `http://127.0.0.1:${port}`);
+    assert.equal((await discoverVariants(a, { home })).entries.length, 1);
+    // A remote host is never contacted, and the message shows no user, password or query.
+    const r = { ...a, env: { OPENAI_HOST: "http://user:secret@example.com" } };
+    assert.deepEqual((await discoverVariants(r, { home })).entries, []);
+    const e = await resolveLaunch(profileEntry(r, "fm serve")).then(() => null, (x) => x.message);
+    assert.match(e, /http:\/\/example\.com\/v1\/models isn't a local http\(s\) URL/); assert.doesNotMatch(e, /secret|user/);
+    const q = await resolveLaunch(profileEntry({ ...a, profiles: [{ ...a.profiles[0], healthUrl: "http://u:pw@127.0.0.1:1/h?token=abc" }] }, "fm serve")).then(() => null, (x) => x.message);
+    assert.match(q, /didn't answer/); assert.doesNotMatch(q, /pw|token|abc/);
   } finally { await new Promise((ok) => srv.close(ok)); }
 });
 

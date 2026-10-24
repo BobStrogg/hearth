@@ -142,17 +142,24 @@ Add or override agents in `agents.json` next to the data directory:
 ```
 
 `detect` entries may also be paths (`~/` is the home folder). An agent can have `profiles`: settings for one
-particular install, used only when that binary (after following symlinks) is the one found, its `envFile` gives at
-least one `KEY: value` / `KEY=value` setting, and its `healthUrl` (if any; on this machine only: `localhost`, `127.x`
-or `::1`) answers just before the launch. Otherwise the agent starts with its own config. Hearth's own `env` still wins.
+particular install, each listed as its own entry ("My Agent · local model") while that binary (after following
+symlinks) is the one found, its `envFile` gives at least one `KEY: value` / `KEY=value` setting, and its `healthUrl`
+(if any; on this machine only: `localhost`, `127.x` or `::1`) answers. Starting one checks again and fails with the
+reason rather than starting without the settings. Hearth's own `env` still wins.
 
 ```json
 [{ "id": "goose", "profiles": [{ "name": "local model", "bin": "~/tools/goose/bin/goose",
    "envFile": "~/tools/goose/goose.env", "keys": ["OPENAI_HOST", "GOOSE_MODEL"], "healthUrl": "${OPENAI_HOST}/v1/models" }] }]
 ```
 
-Goose comes with one: an install from [fm-serve-goose](https://github.com/BobStrogg/fm-serve-goose) (Goose on Apple's
-on-device model via `fm serve`, macOS 27) gets that repo's provider settings while its local proxy answers.
+**Goose providers.** Each provider Goose reports set up (asked over its ACP extension) is its own entry,
+"Goose · <provider>": custom providers you've defined (`~/.config/goose/custom_providers/*.json`, e.g. an
+OpenAI-compatible Cloudflare Workers AI endpoint) unless their key is missing, and other providers once their key is
+set. Each starts `goose acp` with that provider and its default model; the session's Model pill switches between that
+provider's models. Goose also comes with one profile: an install from
+[fm-serve-goose](https://github.com/BobStrogg/fm-serve-goose) adds "Goose · on-Mac (fm serve)" (Apple's on-device model
+via `fm serve`, macOS 27) while its local proxy answers. Plain "Goose" starts with Goose's own config and is left out of
+the picker when one of these is what it would start anyway. Hearth never reads Goose's keys.
 
 ## Security model
 

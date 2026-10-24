@@ -2,6 +2,7 @@
 import "./threadpool.js";
 import { hashPassword } from "./auth.js";
 import { deepProbe, loadAgents, probe } from "./agents.js";
+import { discoverVariants } from "./variants.js";
 import { doctor, printChecks } from "./doctor.js";
 import { dataDir, envFilePath, loadEnvFile, writeEnvFile, type ConfigInput } from "./platform.js";
 import { configFromEnv, Hearth } from "./server.js";
@@ -54,10 +55,14 @@ async function main() {
   }
   if (cmd === "probe") {
     const cfg = configFromEnv(); const agents = loadAgents(cfg.agentsFile);
+    const deep = argv.includes("--deep");
     for (const p of probe(agents)) {
-      let extra = "";
-      if (p.installed && argv.includes("--deep")) extra = JSON.stringify(await deepProbe(agents.find((a) => a.id === p.id)!));
-      console.log(`${p.installed ? "✓" : " "} ${p.id.padEnd(11)} ${p.name.padEnd(16)} ${p.path ?? ""}${p.profile ? ` [${p.profile}]` : ""} ${extra}`);
+      const a = agents.find((x) => x.id === p.id)!;
+      // Its own picker entries too: ready profiles and the backends it reports set up (e.g. Goose's providers).
+      const v = p.installed && (a.discover || a.profiles?.length) ? await discoverVariants(a) : null;
+      const extra = p.installed && deep ? JSON.stringify(await deepProbe(a)) : "";
+      console.log(`${p.installed ? "✓" : " "} ${p.id.padEnd(11)} ${p.name.padEnd(16)} ${p.path ?? ""}${v?.coversDefault ? " (its default is listed below)" : ""} ${extra}`);
+      for (const e of v?.entries ?? []) console.log(`  ↳ ${e.id.padEnd(24)} ${e.name}${deep ? " " + JSON.stringify(await deepProbe(e)) : ""}`);
     }
     return;
   }

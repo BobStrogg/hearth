@@ -15,15 +15,28 @@ export interface AgentDef {
   env?: Record<string, string>;
   /** "tested" = exercised by the Hearth maintainers; "listed" = from public docs only. */
   status?: "tested" | "listed";
-  /** Extra settings used only when a particular install of the agent is the one found (see AgentProfile). */
+  /** Particular installs with their own settings (see AgentProfile): each one that is ready is its own picker entry. */
   profiles?: AgentProfile[];
+  /**
+   * Ask the agent which backends it is set up for and list each as its own picker entry ("goose-providers": Goose's
+   * `_goose/unstable/providers/list` ACP extension; see variants.ts). Model choice within one stays the agent's own
+   * ACP Model option.
+   */
+  discover?: "goose-providers";
+  /** Set on picker entries derived from another agent (a profile or a discovered provider): the agent they come from. */
+  parent?: string;
+  /** A profile entry: the AgentProfile name it starts with (its settings are read, and checked, at each launch). */
+  profile?: string;
+  /** A discovered-backend entry: its label (logged as "started goose (label)"; env carries the settings). */
+  variant?: string;
 }
 
 /**
- * Launch settings for one particular install of an agent, e.g. a Goose set up to use a local model. It applies only
- * when the agent's binary that was found (after following symlinks) is `bin`, its `envFile` gives at least one
- * setting, and (with `healthUrl`) that URL answers right now. Otherwise the agent starts with its own config as usual.
- * Paths may start with "~/" (the home folder).
+ * Launch settings for one particular install of an agent, e.g. a Goose set up to use a local model. It shows up as its
+ * own picker entry ("Goose · on-Mac (fm serve)") only while the agent's binary that was found (after following
+ * symlinks) is `bin`, its `envFile` gives at least one setting, and (with `healthUrl`) that URL answers; a launch checks
+ * again and fails with the reason rather than quietly starting without the settings. The plain agent entry always
+ * starts with the agent's own config. Paths may start with "~/" (the home folder).
  */
 export interface AgentProfile {
   /** A short label, shown by `hearth probe` and in the agent list. */
@@ -57,10 +70,12 @@ export const BUILTIN_AGENTS: AgentDef[] = [
   { id: "qwen", name: "Qwen Code", detect: ["qwen"], command: "qwen", args: ["--acp"] },
   { id: "kimi", name: "Kimi CLI", detect: ["kimi"], command: "kimi", args: ["acp"] },
   // Goose (`goose acp`). Also found where fm-serve-goose puts it (Goose on Apple's on-device model through `fm serve`
-  // and a local tool-call proxy); for that install, its settings come from the repo's config.example.yaml, and only
-  // while the proxy answers (no proxy, e.g. before macOS 27: Goose uses its own config).
+  // and a local tool-call proxy). Picker entries: one per provider Goose itself reports set up (custom providers such as
+  // a Cloudflare Workers AI endpoint, providers with a key), plus "on-Mac (fm serve)" for that install while its proxy
+  // answers (settings from the repo's config.example.yaml); plain "Goose" (its own config) unless one of those is it.
   { id: "goose", name: "Goose", detect: ["goose", "~/Developer/fm-serve-goose/bin/goose"], command: "goose", args: ["acp"],
-    profiles: [{ name: "fm serve", bin: "~/Developer/fm-serve-goose/bin/goose", envFile: "~/Developer/fm-serve-goose/config.example.yaml",
+    discover: "goose-providers",
+    profiles: [{ name: "on-Mac (fm serve)", bin: "~/Developer/fm-serve-goose/bin/goose", envFile: "~/Developer/fm-serve-goose/config.example.yaml",
       keys: ["GOOSE_PROVIDER", "GOOSE_MODEL", "OPENAI_HOST", "OPENAI_BASE_PATH", "GOOSE_CONTEXT_LIMIT", "GOOSE_AUTO_COMPACT_THRESHOLD"],
       healthUrl: "${OPENAI_HOST}/v1/models" }] },
   { id: "junie", name: "Junie", detect: ["junie"], command: "junie", args: ["--acp=true"] },
@@ -113,9 +128,11 @@ export function loadAgents(file?: string): AgentDef[] {
 
 export interface ProbeResult {
   id: string; name: string; installed: boolean; path?: string; status?: string;
-  /** The AgentProfile that matches the install found (it is used at launch only if its healthUrl answers then). */
+  /** The AgentProfile that matches the install found (listed as its own entry while its healthUrl answers). */
   profile?: string;
-  deep?: { ok: boolean; error?: string; loadSession?: boolean; authMethods?: string[]; agentName?: string; profile?: string; note?: string };
+  /** Derived entries: the agent they come from; the plain entry is `hidden` from the picker when one of them is it. */
+  parent?: string; hidden?: boolean;
+  deep?: { ok: boolean; error?: string; loadSession?: boolean; authMethods?: string[]; agentName?: string; profile?: string };
 }
 
 /** The first detect binary found (PATH, the usual install folders, or a "~/"/absolute path). */
@@ -141,10 +158,11 @@ export function readEnvFile(file: string, keys?: string[]): Record<string, strin
 }
 
 /** The profile matching this install (bin and envFile), with its settings; reachability isn't checked here. */
-export function matchProfile(a: AgentDef, found: string | undefined, home = homedir()): { profile: AgentProfile; env: Record<string, string> } | null {
+export function matchProfile(a: AgentDef, found: string | undefined, home = homedir(), name?: string): { profile: AgentProfile; env: Record<string, string> } | null {
   const f = found && real(found);
   if (!f) return null;
   for (const p of a.profiles ?? []) {
+    if (name !== undefined && p.name !== name) continue;
     if (real(expandHome(p.bin, home)) !== f) continue;
     const env = p.envFile ? readEnvFile(expandHome(p.envFile, home), p.keys) : {};
     if (Object.keys(env).length) return { profile: p, env };
@@ -159,38 +177,51 @@ export function localUrl(url: string): URL | null {
   const h = u.hostname.replace(/^\[|\]$/g, "");
   return /^https?:$/.test(u.protocol) && (h === "localhost" || h === "::1" || /^127\.\d+\.\d+\.\d+$/.test(h)) ? u : null;
 }
-/** The URL as shown in notes: no user, password, query or fragment. */
-const shown = (url: string) => { try { const u = new URL(url); return u.origin + u.pathname; } catch { return "(invalid URL)"; } };
-async function answers(url: string): Promise<boolean> {
+/** The URL as shown in messages: no user, password, query or fragment. */
+export const shown = (url: string) => { try { const u = new URL(url); return u.origin + u.pathname; } catch { return "(invalid URL)"; } };
+export async function answers(url: string): Promise<boolean> {
   const u = localUrl(url);
   if (!u) return false;
   try { const r = await fetch(u, { redirect: "error", signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS) }); await r.body?.cancel(); return r.ok; } catch { return false; }
 }
 
-export interface Launch { command: string; args: string[]; env: Record<string, string>; profile?: string; note?: string }
+export interface Launch { command: string; args: string[]; env: Record<string, string>; profile?: string }
+
+/** A profile's health URL with `${NAME}` filled in from the settings it would launch with (or Hearth's own env). */
+export function healthUrlFor(p: AgentProfile, env: Record<string, string>): string | undefined {
+  return p.healthUrl?.replace(/\$\{([A-Z0-9_]+)\}/g, (_, k: string) => (env[k] ?? process.env[k] ?? "").replace(/\/+$/, ""));
+}
+
+/** Why a profile can't be used right now (its health URL isn't local or doesn't answer), or null when it can. */
+export async function profileProblem(p: AgentProfile, env: Record<string, string>): Promise<string | null> {
+  const url = healthUrlFor(p, env);
+  if (!url || await answers(url)) return null;
+  return `${shown(url)} ${localUrl(url) ? "didn't answer" : "isn't a local http(s) URL"}`;
+}
 
 /**
  * How to start the agent right now: its command (the binary that was found, when the command itself isn't on the
- * PATH), its args and env, plus a matching profile's settings when that install is the one found and its health URL
- * answers. Hearth's own env (`a.env`, e.g. from agents.json) still wins over a profile's.
+ * PATH), its args and env. A profile entry (`a.profile`) also gets that profile's settings, checked now: if its install
+ * or config is gone or its health URL doesn't answer, this throws with the reason instead of starting the agent
+ * without them. Hearth's own env (`a.env`, e.g. from agents.json) still wins over a profile's.
  */
 export async function resolveLaunch(a: AgentDef, home = homedir()): Promise<Launch> {
   const onPath = which(a.command);
-  const found = a.profiles?.length || !onPath ? findAgent(a) : undefined;
+  const found = a.profiles?.length || a.profile || !onPath ? findAgent(a) : undefined;
   // The command isn't on the PATH but the same program was found elsewhere (e.g. "~/…/bin/goose"): start that one.
   const same = (p: string) => basename(p).replace(/\.(exe|cmd)$/i, "") === basename(expandHome(a.command, home));
   const command = onPath && onPath !== a.command && a.command.startsWith("~") ? onPath : !onPath && found && same(found) ? found : a.command;
-  const base: Launch = { command, args: a.args, env: { ...a.env } };
-  const m = matchProfile(a, found, home);
-  if (!m) return base;
+  if (a.profile === undefined) return { command, args: a.args, env: { ...a.env }, ...(a.variant ? { profile: a.variant } : {}) };
+  const m = matchProfile(a, found, home, a.profile);
+  if (!m) {
+    const p = a.profiles?.find((x) => x.name === a.profile);
+    throw new Error(`${a.name}: ${p ? `${p.bin}${p.envFile ? ` or ${p.envFile}` : ""} isn't there (or isn't the ${basename(a.command)} found)` : "that profile no longer exists"}`);
+  }
   // The settings it would launch with (Hearth's own env wins), so the check tests the host that would really be used.
   const env = { ...m.env, ...a.env };
-  const url = m.profile.healthUrl?.replace(/\$\{([A-Z0-9_]+)\}/g, (_, k: string) => (env[k] ?? process.env[k] ?? "").replace(/\/+$/, ""));
-  if (url && !(await answers(url))) {
-    const why = localUrl(url) ? "didn't answer" : "isn't a local http(s) URL";
-    return { ...base, note: `${m.profile.name}: ${shown(url)} ${why}, so ${a.name} uses its own config` };
-  }
-  return { command: same(found!) ? found! : command, args: a.args, env, profile: m.profile.name };
+  const why = await profileProblem(m.profile, env);
+  if (why) throw new Error(`${a.name}: ${why}; start it and try again (or pick another agent)`);
+  return { command: found && same(found) ? found : command, args: a.args, env, profile: m.profile.name };
 }
 
 /** Cheap probe: is a detect binary on the PATH (or at one of its paths)? */
@@ -204,7 +235,8 @@ export function probe(agents: AgentDef[]): ProbeResult[] {
 
 /** Deep probe: start the agent and run `initialize`, then kill it. */
 export async function deepProbe(a: AgentDef, timeoutMs = 20000): Promise<ProbeResult["deep"]> {
-  const l = await resolveLaunch(a);
+  let l: Launch;
+  try { l = await resolveLaunch(a); } catch (e) { return { ok: false, error: String((e as Error).message ?? e), profile: a.profile }; }
   // Its own process group, so the kill below also stops anything it started (an npx or shell wrapper's child).
   const child = spawn(l.command, l.args, { stdio: ["pipe", "pipe", "pipe"], detached: process.platform !== "win32", env: { ...process.env, PATH: searchPath(), ...l.env }, ...winShell() });
   let err = "";
@@ -219,9 +251,9 @@ export async function deepProbe(a: AgentDef, timeoutMs = 20000): Promise<ProbeRe
         child.on("error", rej);
       }),
     ]);
-    return { ok: true, loadSession: !!res.agentCapabilities?.loadSession, authMethods: (res.authMethods ?? []).map((m) => m.id), agentName: res.agentInfo?.name, profile: l.profile, note: l.note };
+    return { ok: true, loadSession: !!res.agentCapabilities?.loadSession, authMethods: (res.authMethods ?? []).map((m) => m.id), agentName: res.agentInfo?.name, profile: l.profile };
   } catch (e) {
-    return { ok: false, error: String((e as Error).message ?? e), profile: l.profile, note: l.note };
+    return { ok: false, error: String((e as Error).message ?? e), profile: l.profile };
   } finally {
     if (process.platform !== "win32" && child.pid) { try { process.kill(-child.pid, "SIGKILL"); } catch { child.kill("SIGKILL"); } } else child.kill("SIGKILL");
   }

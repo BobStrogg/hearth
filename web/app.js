@@ -126,7 +126,8 @@ function waitForVersion(old, bar) {
 
 // ---------- new session sheet ----------
 async function newSession() {
-  const installed = agents.filter((a) => a.installed);
+  // Derived entries ("Goose · Cloudflare Workers AI") are agents of their own; a plain one they already cover is hidden.
+  const installed = agents.filter((a) => a.installed && !a.hidden);
   const sheet = $("#sheet"); sheet.hidden = false;
   const sel = h("select", { "aria-label": "Agent" }, installed.map((a) => h("option", { value: a.id }, a.name)));
   const title = h("input", { placeholder: "Title (optional)" });
@@ -153,7 +154,8 @@ async function newSession() {
 
 // ---------- import existing agent sessions ----------
 async function importSessions() {
-  const installed = agents.filter((a) => a.installed);
+  // One entry per program: Goose's sessions are the same whichever provider started them.
+  const installed = agents.filter((a) => a.installed && !a.parent);
   const sheet = $("#sheet"); sheet.hidden = false;
   const sel = h("select", { "aria-label": "Agent" }, installed.map((a) => h("option", { value: a.id }, a.name)));
   const info = h("p", { class: "muted" }); const list = h("ul", { class: "dirs" }); const err = h("p", { class: "err" });

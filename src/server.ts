@@ -5,6 +5,7 @@ import { basename, dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer, type WebSocket } from "ws";
 import { type AgentDef, deepProbe, loadAgents, probe } from "./agents.js";
+import { discoverVariants, restoreVariant, saveVariant, type SavedVariant, type Variants } from "./variants.js";
 import { Auth, type AuthConfig, parseUserAliases } from "./auth.js";
 import { listExternal } from "./importer.js";
 import { installInfo, isSea } from "./install-info.js";
@@ -121,6 +122,11 @@ export class Hearth {
   server = createServer((q, s) => { this.http(q, s).catch((e) => this.send(s, 500, { error: String(e?.message ?? e) })); });
   wss = new WebSocketServer({ noServer: true, maxPayload: 8 * 1024 * 1024, perMessageDeflate: false });
   private deepCache = new Map<string, unknown>();
+  /** Derived picker entries per agent (profiles, discovered backends): the latest look, and one refresh at a time. */
+  private variants = new Map<string, Variants>();
+  private variantRuns = new Map<string, Promise<Variants>>();
+  /** Every derived entry seen (saved in agent-variants.json, no secrets), so its sessions still start after a restart. */
+  private knownVariants = new Map<string, AgentDef>();
   private rel: { at: number; release?: Release; error?: string } = { at: 0 };
   private updating = 0; private pendingSince = 0; private autoTimer?: NodeJS.Timeout;
   files: Files | null = null; push: Push | null = null; voice: Voice | null = null;
@@ -133,6 +139,13 @@ export class Hearth {
     this.store = new Store(cfg.dataDir);
     this.auth = new Auth(cfg);
     this.agents = loadAgents(cfg.agentsFile);
+    try {
+      for (const s of JSON.parse(readFileSync(this.variantsFile, "utf8")) as SavedVariant[]) {
+        const parent = this.agents.find((a) => a.id === s?.parent);
+        const e = parent && restoreVariant(parent, s);
+        if (e && !this.agents.some((a) => a.id === e.id)) this.knownVariants.set(e.id, e);
+      }
+    } catch { /* none yet */ }
     if (cfg.files) { try { this.files = new Files(cfg.filesRoot, { timeoutMs: cfg.filesTimeoutMs }); } catch { this.files = null; } }
     if (cfg.voice) this.voice = new Voice(cfg.dataDir);
     if (cfg.push) {
@@ -227,10 +240,33 @@ export class Hearth {
     return chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : {};
   }
 
+  private get variantsFile() { return join(this.cfg.dataDir, "agent-variants.json"); }
+  /** A built-in/agents.json agent, or a derived entry (e.g. "goose.custom_cloudflare") seen before. */
+  agentById(id: unknown): AgentDef | undefined {
+    return typeof id === "string" ? this.agents.find((a) => a.id === id) ?? this.knownVariants.get(id) : undefined;
+  }
+  /** The agent's derived entries: cached for a minute, then refreshed in the background (the first look waits). */
+  private async variantsOf(a: AgentDef): Promise<Variants> {
+    const cur = this.variants.get(a.id);
+    if (cur && Date.now() - cur.at < 60_000) return cur;
+    let run = this.variantRuns.get(a.id);
+    if (!run) {
+      run = discoverVariants(a).then((v) => {
+        this.variants.set(a.id, v);
+        let changed = false;
+        for (const e of v.entries) if (!this.agents.some((x) => x.id === e.id) && JSON.stringify(this.knownVariants.get(e.id)) !== JSON.stringify(e)) { this.knownVariants.set(e.id, e); changed = true; }
+        if (changed) { try { writeFileSync(this.variantsFile, JSON.stringify([...this.knownVariants.values()].map(saveVariant), null, 1)); } catch { /* read-only data dir: kept in memory */ } }
+        return v;
+      }).finally(() => this.variantRuns.delete(a.id));
+      this.variantRuns.set(a.id, run);
+    }
+    return cur ?? run;
+  }
+
   private liveFor(m: SessionMeta): LiveSession {
     let l = this.live.get(m.id);
     if (!l) {
-      const a = this.agents.find((x) => x.id === m.agentId);
+      const a = this.agentById(m.agentId);
       if (!a) throw new Error(`unknown agent ${m.agentId}`);
       l = new LiveSession(m, a, this.store, this.agentPids);
       this.live.set(m.id, l);
@@ -311,16 +347,28 @@ export class Hearth {
     if (url.pathname === "/api/agents") {
       const deep = url.searchParams.get("deep");
       if (deep) {
-        const a = this.agents.find((x) => x.id === deep);
+        const a = this.agentById(deep);
         if (!a) return this.send(s, 404, { error: "no such agent" });
         const r = await deepProbe(a); this.deepCache.set(a.id, r);
         return this.send(s, 200, r);
       }
-      return this.send(s, 200, probe(this.agents).map((p) => ({ ...p, path: undefined, deep: this.deepCache.get(p.id) })));
+      // Each agent, then its derived entries (e.g. "Goose · Cloudflare Workers AI"). The plain entry is `hidden` from the
+      // new-session picker when a derived one is what it would start anyway; derived entries that aren't ready right now
+      // stay listed as not installed, so their sessions still show a name.
+      const out: Record<string, unknown>[] = [];
+      for (const p of probe(this.agents)) {
+        const a = this.agents.find((x) => x.id === p.id)!;
+        const v = p.installed && (a.discover || a.profiles?.length) ? await this.variantsOf(a).catch(() => null) : null;
+        out.push({ ...p, path: undefined, deep: this.deepCache.get(p.id), ...(v?.coversDefault ? { hidden: true } : {}) });
+        const ready = new Set(v?.entries.map((e) => e.id));
+        for (const e of v?.entries ?? []) out.push({ id: e.id, name: e.name, installed: true, status: p.status, parent: a.id, ...(e.profile !== undefined ? { profile: e.profile } : {}), deep: this.deepCache.get(e.id) });
+        for (const e of this.knownVariants.values()) if (e.parent === a.id && !ready.has(e.id)) out.push({ id: e.id, name: e.name, installed: false, status: p.status, parent: a.id });
+      }
+      return this.send(s, 200, out);
     }
     const em = /^\/api\/agents\/([a-z0-9_.-]+)\/sessions$/.exec(url.pathname);
     if (em && q.method === "GET") {
-      const a = this.agents.find((x) => x.id === em[1]);
+      const a = this.agentById(em[1]);
       if (!a) return this.send(s, 404, { error: "no such agent" });
       const cwd = url.searchParams.get("cwd") || undefined;
       if (cwd && !this.cfg.roots.some((r) => within(r, cwd))) return this.send(s, 403, { error: "outside allowed roots" });
@@ -331,7 +379,7 @@ export class Hearth {
     }
     if (url.pathname === "/api/sessions/import" && q.method === "POST") {
       const b = await this.body(q);
-      const agent = this.agents.find((a) => a.id === b.agentId);
+      const agent = this.agentById(b.agentId);
       const sidExt = String(b.agentSessionId ?? "");
       if (!agent || !sidExt || sidExt.length > 200) return this.send(s, 400, { error: "agentId and agentSessionId required" });
       const cwd = resolve(String(b.cwd ?? ""));
@@ -359,7 +407,7 @@ export class Hearth {
       if (q.method === "GET") return this.send(s, 200, this.store.list(who).map((m) => this.view(m)));
       if (q.method === "POST") {
         const b = await this.body(q);
-        const agent = this.agents.find((a) => a.id === b.agentId);
+        const agent = this.agentById(b.agentId);
         if (!agent) return this.send(s, 400, { error: "unknown agent" });
         const cwd = resolve(String(b.cwd ?? ""));
         if (!this.cfg.roots.some((r) => within(r, cwd)) || !statSync(cwd, { throwIfNoEntry: false })?.isDirectory()) return this.send(s, 400, { error: "cwd must be an existing folder inside the allowed roots" });

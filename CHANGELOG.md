@@ -1,13 +1,24 @@
 # Changelog
 
 ## Unreleased
-- Goose (`goose acp`) is also found where [fm-serve-goose](https://github.com/BobStrogg/fm-serve-goose) installs it
-  (`~/Developer/fm-serve-goose/bin/goose`), as well as on the PATH, `~/.local/bin` and Homebrew. When that install is
-  the one found (directly or through a symlink) and its proxy for Apple's on-device model answers, Goose starts with the
-  repo's settings (provider, model, host, base path, context limit, read from its `config.example.yaml`); when the
-  proxy isn't running, Goose starts with its own config. `hearth probe` shows `[fm serve]` for that install.
+- Goose's providers are agents of their own in the picker. Hearth asks Goose (its ACP extension,
+  `_goose/unstable/providers/list`) which providers are set up and lists each as "Goose · <provider>", e.g.
+  "Goose · Cloudflare Workers AI": a custom provider you defined (`~/.config/goose/custom_providers/*.json`) unless its
+  key is missing, or another provider once its key is set. Each starts `goose acp` with `GOOSE_PROVIDER` and that
+  provider's default model; pick another of its models with the session's Model pill (Goose's own ACP option, remembered
+  per entry). If Goose's config pins one context limit (fm-serve-goose sets 4096 for the on-device model), another
+  provider gets the smallest limit its own models advertise instead. Hearth never reads or stores a key: Goose only
+  says whether it is set. An older Goose without these methods just shows as "Goose".
+- Goose is also found where [fm-serve-goose](https://github.com/BobStrogg/fm-serve-goose) installs it
+  (`~/Developer/fm-serve-goose/bin/goose`), as well as on the PATH, `~/.local/bin` and Homebrew. That install adds
+  "Goose · on-Mac (fm serve)" (Apple's on-device model, macOS 27) while its local proxy answers, started with the repo's
+  settings from its `config.example.yaml`; if the proxy has stopped by the time you start one, the session says so
+  instead of quietly using another model.
+- Plain "Goose" (its own config) stays, but is left out of the new-session picker when one of the entries above is what
+  it would start anyway. Entries that aren't ready right now are left out too; their existing sessions keep working
+  (saved in `agent-variants.json`, provider and model names only). `hearth probe` lists them under the agent.
 - Agents can now have `profiles` (in `src/agents.ts` or `agents.json`): settings for one particular install, read from
-  a file and used only while a health URL answers. `detect` and `bin` paths may start with `~/`.
+  a file, each its own picker entry while a health URL answers. `detect` and `bin` paths may start with `~/`.
 
 ## 0.6.0
 - Voice, all opt-in and per device. A mic button by the message box dictates into it: the browser's own speech

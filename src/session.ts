@@ -385,7 +385,7 @@ export class LiveSession {
     const startedAt = new Date(spawnedAt).toISOString();
     this.pids?.add(child.pid, l.command);
     // Marks where this run's output starts in agent-stderr.log (local time with offset; the command name only, no args).
-    if (child.pid) this.stderrLog(`--- hearth ${VERSION}: started ${basename(l.command)}${l.profile ? ` (${l.profile})` : ""} (pid ${child.pid}) at ${localStamp(new Date(spawnedAt))} ---\n${l.note ? `--- hearth: ${l.note} ---\n` : ""}`);
+    if (child.pid) this.stderrLog(`--- hearth ${VERSION}: started ${basename(l.command)}${l.profile ? ` (${l.profile})` : ""} (pid ${child.pid}) at ${localStamp(new Date(spawnedAt))} ---\n`);
     let tail = "", stderrBytes = 0;
     child.stderr!.on("data", (d: Buffer) => { this.stderrLog(d); stderrBytes += d.length; tail = (tail + d.toString()).slice(-4000); });
     const tailLines = () => tail.replace(/\s+$/, "").split("\n").slice(-20).join("\n") || undefined;
