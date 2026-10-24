@@ -508,9 +508,10 @@ export class Hearth {
       if (url.pathname === "/api/voice/transcribe" && q.method === "POST") {
         if (!/^audio\/(wav|x-wav|wave)$/i.test(String(q.headers["content-type"] ?? "").split(";")[0].trim())) return this.send(s, 415, { error: "send audio/wav" });
         const len = Number(q.headers["content-length"] ?? NaN);
-        // Refused before the whole body is read: close the connection afterwards so the browser never reuses a socket
-        // that still has upload bytes in flight (macOS turned that into "fetch failed" on the next request).
-        if (len > MAX_AUDIO_BYTES) { q.resume(); s.setHeader("connection", "close"); return this.send(s, 413, { error: "recording too large" }); }
+        // Far too large: refused before reading it, and the connection is closed afterwards so the browser never reuses
+        // a socket that still has upload bytes in flight. Up to 4x the cap, the body is read and dropped first (as
+        // rawBody does), so the 413 arrives after the upload instead of the socket closing mid-upload ("fetch failed").
+        if (len > 4 * MAX_AUDIO_BYTES) { q.resume(); s.setHeader("connection", "close"); return this.send(s, 413, { error: "recording too large" }); }
         const buf = await this.rawBody(q, MAX_AUDIO_BYTES);
         if (!buf) { s.setHeader("connection", "close"); return this.send(s, 413, { error: "recording too large" }); }
         const lang = (url.searchParams.get("lang") ?? "").slice(0, 2).toLowerCase();

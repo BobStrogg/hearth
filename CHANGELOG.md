@@ -23,6 +23,8 @@
   (saved in `agent-variants.json`, provider and model names only). `hearth probe` lists them under the agent.
 - Agents can now have `profiles` (in `src/agents.ts` or `agents.json`): settings for one particular install, read from
   a file, each its own picker entry while a health URL answers. `detect` and `bin` paths may start with `~/`.
+- Voice: a recording a little over the size limit (up to 4x) is read and dropped before the 413, so the browser gets
+  the "recording too large" message instead of a dropped connection (seen as "fetch failed" on macOS).
 
 ## 0.6.0
 - Voice, all opt-in and per device. A mic button by the message box dictates into it: the browser's own speech
