@@ -9,7 +9,7 @@ import { createHash } from "node:crypto";
 import vm from "node:vm";
 import { after, before, test } from "node:test";
 import { Hearth, configFromEnv } from "../dist/server.js";
-import { cleanTranscript, downloadModel, findModel, parseWav, ttsInput, Voice, MAX_AUDIO_BYTES } from "../dist/voice.js";
+import { canonicalWav, cleanTranscript, downloadModel, findModel, parseWav, ttsInput, Voice, MAX_AUDIO_BYTES } from "../dist/voice.js";
 
 const WIN = process.platform === "win32";
 const ctx = {}; vm.createContext(ctx); vm.runInContext(readFileSync(new URL("../web/voice.js", import.meta.url), "utf8"), ctx);
@@ -23,6 +23,9 @@ test("parseWav accepts the browser's 16 kHz mono PCM and rejects anything else",
   const b = wav(0.1); b.writeUInt16LE(3, 20); assert.throws(() => parseWav(b), /16-bit PCM/); // float format
   const c = wav(0.1); c.writeUInt32LE(4000, 24); assert.throws(() => parseWav(c), /unsupported/);
   assert.throws(() => parseWav(wav(0.1).subarray(0, 40)), /not a WAV/);
+  // audio appended after the declared data is not passed on (the length check covers what the engine gets)
+  const tail = Buffer.concat([wav(1), Buffer.alloc(64000, 1)]), ti = parseWav(tail), cw = canonicalWav(tail, ti);
+  assert.equal(cw.length, 44 + 32000); assert.equal(parseWav(cw).seconds, 1);
 });
 
 test("cleanTranscript drops whisper's annotations and timestamps; ttsInput is one capped line", () => {
@@ -47,6 +50,10 @@ test("findModel prefers the default English model; downloadModel checks size and
   assert.deepEqual(readdirSync(join(d, "bad")), [], "no partial file left behind");
   await assert.rejects(downloadModel(join(d, "big"), { ...m, bytes: 4 }, fake), /larger than expected/);
   await assert.rejects(downloadModel(join(d, "404"), m, async () => new Response("no", { status: 404 })), /HTTP 404/);
+  if (!WIN && process.getuid?.() !== 0) { // a write error fails the download instead of crashing the process
+    const ro = join(d, "ro"); mkdirSync(ro); chmodSync(ro, 0o500);
+    await assert.rejects(downloadModel(ro, m, fake), /EACCES|permission/i); chmodSync(ro, 0o700);
+  }
 });
 
 // ---- endpoints, with stand-in engines ----
@@ -130,6 +137,8 @@ test("speakable: final reply text only, code, diffs, links and markup left out",
 test("splitSentences, pickVoice, WAV encoding and downsampling", () => {
   const parts = HV.splitSentences("Hello there. This is a test! " + "word ".repeat(80) + "end.");
   assert.ok(parts.every((p) => p.length <= 220)); assert.equal(parts[0], "Hello there. This is a test!");
+  const id = "x".repeat(500); assert.equal(HV.splitSentences(id).join(""), id, "a long word loses no characters");
+  const commas = "alpha, ".repeat(60).trim(); assert.equal(HV.splitSentences(commas).join(" ").replace(/\s+/g, " "), commas);
   const voices = [
     { name: "Albert", lang: "en-US", localService: true, voiceURI: "a" }, { name: "Samantha (Compact)", lang: "en-US", localService: true, voiceURI: "s" },
     { name: "Google US English", lang: "en-US", localService: false, voiceURI: "g" }, { name: "Ava (Premium)", lang: "en-US", localService: true, voiceURI: "ava" },
@@ -142,4 +151,16 @@ test("splitSentences, pickVoice, WAV encoding and downsampling", () => {
   const w = parseWav(Buffer.from(HV.encodeWav(down))); assert.equal(w.seconds, 1);
   assert.equal(HV.joinDictation("Fix the", "parser please"), "Fix the parser please"); assert.equal(HV.joinDictation("", " hi "), "hi"); assert.equal(HV.joinDictation("x ", ""), "x ");
   assert.ok(Math.abs(HV.rms(new Float32Array([0.5, -0.5])) - 0.5) < 1e-9);
+});
+
+test("one voice job at a time: requests wait their turn (no overlap); beyond three, busy", { skip: WIN && "shell stand-ins" }, async () => {
+  const d = mkdtempSync(join(tmpdir(), "hvslot-")), lock = join(d, "lock"), log = join(d, "overlap");
+  writeFileSync(join(d, "whisper-cli"), `#!/bin/sh\n[ -e "${lock}" ] && echo overlap >> "${log}"\ntouch "${lock}"\nsleep 0.3\nrm -f "${lock}"\necho " ok"\n`); chmodSync(join(d, "whisper-cli"), 0o755);
+  mkdirSync(join(d, "models")); writeFileSync(join(d, "models", "ggml-base.en-q5_1.bin"), "m");
+  const v = new Voice(d, { HEARTH_WHISPER_BIN: join(d, "whisper-cli") }, "linux");
+  const rs = await Promise.allSettled([1, 2, 3, 4, 5].map(() => v.transcribe(wav(1))));
+  assert.deepEqual(rs.map((r) => r.status), ["fulfilled", "fulfilled", "fulfilled", "rejected", "rejected"]);
+  assert.equal(rs[3].reason.status, 429);
+  assert.ok(!existsSync(log), "never two engines at once");
+  assert.equal((await v.transcribe(wav(1))).text, "ok", "free again afterwards");
 });

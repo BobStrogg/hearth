@@ -54,8 +54,10 @@
     for (let p of parts) {
       p = p.trim(); if (!p) continue;
       while (p.length > max) {
-        let at = p.lastIndexOf(", ", max); if (at < max / 3) at = p.lastIndexOf(" ", max); if (at < max / 3) at = max;
-        out.push(p.slice(0, at + (p[at] === "," ? 1 : 0)).trim()); p = p.slice(at + 1).trim();
+        let at = p.lastIndexOf(", ", max - 1), skip = 2; // keep the comma, drop the space
+        if (at < max / 3) { at = p.lastIndexOf(" ", max); skip = 1; if (at >= max / 3) { out.push(p.slice(0, at).trim()); p = p.slice(at + skip).trim(); continue; } }
+        if (at < max / 3) { out.push(p.slice(0, max)); p = p.slice(max); continue; } // no break point: cut, losing nothing
+        out.push(p.slice(0, at + 1).trim()); p = p.slice(at + skip).trim();
       }
       if (p) out.push(p);
     }

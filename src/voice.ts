@@ -7,7 +7,7 @@
  * Uploads are size- and length-capped, each job has a deadline, and temp files are deleted afterwards.
  */
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { createWriteStream, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { cpus, tmpdir } from "node:os";
 import { basename, join } from "node:path";
@@ -48,6 +48,17 @@ export function parseWav(b: Buffer): WavInfo {
     off = body + size + (size & 1);
   }
   throw new Error("WAV has no audio data");
+}
+
+/** A plain 44-byte-header WAV holding exactly the audio `info` describes (drops extra chunks and trailing bytes). */
+export function canonicalWav(b: Buffer, info: WavInfo): Buffer {
+  const data = b.subarray(info.dataOffset, info.dataOffset + info.dataBytes - (info.dataBytes % (info.channels * 2)));
+  const h = Buffer.alloc(44);
+  h.write("RIFF", 0, "latin1"); h.writeUInt32LE(36 + data.length, 4); h.write("WAVE", 8, "latin1"); h.write("fmt ", 12, "latin1");
+  h.writeUInt32LE(16, 16); h.writeUInt16LE(1, 20); h.writeUInt16LE(info.channels, 22); h.writeUInt32LE(info.sampleRate, 24);
+  h.writeUInt32LE(info.sampleRate * info.channels * 2, 28); h.writeUInt16LE(info.channels * 2, 32); h.writeUInt16LE(16, 34);
+  h.write("data", 36, "latin1"); h.writeUInt32LE(data.length, 40);
+  return Buffer.concat([h, data]);
 }
 
 /** whisper.cpp output as plain text: no timestamps, no [BLANK_AUDIO] / (music) style annotations, single spaces. */
@@ -107,7 +118,7 @@ const run = (bin: string, args: string[], opts: { timeout: number; input?: strin
 export interface InstallState { running: boolean; step?: string; error?: string; done?: boolean; at?: number }
 
 export class Voice {
-  private busy = 0; private waiting = 0;
+  private queue: Promise<unknown> = Promise.resolve(); private pending = 0;
   install: InstallState = { running: false };
   constructor(readonly dataDir: string, readonly env: NodeJS.ProcessEnv = process.env, readonly platform = process.platform) {}
 
@@ -123,13 +134,13 @@ export class Voice {
     };
   }
 
-  /** One job at a time per Hearth (a second waits; more get "busy"). */
-  private async slot<T>(fn: () => Promise<T>): Promise<T> {
-    if (this.busy && this.waiting >= 2) throw new VoiceError(429, "busy with other voice requests; try again in a moment");
-    this.waiting++;
-    try { while (this.busy) await new Promise((r) => setTimeout(r, 100)); } finally { this.waiting--; }
-    this.busy++;
-    try { return await fn(); } finally { this.busy--; }
+  /** One job at a time per Hearth, in order: one running plus two waiting; more get "busy". */
+  private slot<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.pending >= 3) return Promise.reject(new VoiceError(429, "busy with other voice requests; try again in a moment"));
+    this.pending++;
+    const run = this.queue.then(fn, fn).finally(() => { this.pending--; });
+    this.queue = run.catch(() => {});
+    return run;
   }
   private tmp(): string { return mkdtempSync(join(tmpdir(), "hearth-voice-")); } // mode 0700
 
@@ -143,7 +154,7 @@ export class Voice {
     return this.slot(async () => {
       const dir = this.tmp(), f = join(dir, "in.wav"), t0 = Date.now();
       try {
-        writeFileSync(f, wav, { mode: 0o600 });
+        writeFileSync(f, canonicalWav(wav, info), { mode: 0o600 }); // only the declared audio, nothing appended after it
         const english = /\.en[.-]/.test(basename(model));
         const l = english ? "en" : /^[a-z]{2}$/.test(lang ?? "") ? lang! : "auto";
         const threads = String(Math.max(1, Math.min(8, cpus().length - 1)));
@@ -207,17 +218,20 @@ export class Voice {
 /** Download the default model into `dir` (temp file, SHA-256 and size checked, then renamed into place). */
 export async function downloadModel(dir: string, m = DEFAULT_MODEL, fetchImpl: typeof fetch = fetch): Promise<string> {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const dest = join(dir, m.name), part = `${dest}.part`;
+  const dest = join(dir, m.name), part = `${dest}.${process.pid}.${randomBytes(4).toString("hex")}.part`; // parallel installs don't share a file
   const r = await fetchImpl(m.url, { signal: AbortSignal.timeout(INSTALL_TIMEOUT_MS), redirect: "follow" });
   if (!r.ok || !r.body) throw new Error(`model download failed: HTTP ${r.status}`);
   const hash = createHash("sha256"); let n = 0;
   const out = createWriteStream(part, { mode: 0o600 });
+  // a write error (disk full…) must fail the install, not crash Hearth with an unhandled stream error
+  const failed = new Promise<never>((_, rej) => out.once("error", rej)); failed.catch(() => {});
   try {
     for await (const chunk of r.body as unknown as AsyncIterable<Uint8Array>) {
       n += chunk.length; if (n > m.bytes) throw new Error("model download is larger than expected");
-      hash.update(chunk); if (!out.write(chunk)) await new Promise((res) => out.once("drain", res));
+      hash.update(chunk); if (!out.write(chunk)) await Promise.race([new Promise((res) => out.once("drain", res)), failed]);
     }
-    await new Promise<void>((res, rej) => out.end((e?: Error | null) => (e ? rej(e) : res())));
+    await Promise.race([new Promise<void>((res) => out.end(() => res())), failed]);
+    if (out.errored) throw out.errored;
     const got = hash.digest("hex");
     if (n !== m.bytes || got !== m.sha256) throw new Error("model download didn't match its checksum");
     renameSync(part, dest);

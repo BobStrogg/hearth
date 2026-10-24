@@ -767,7 +767,7 @@ class Chat {
   render(e) {
     const msg = e.msg || {};
     if (e.dir === "out" && msg.method === "session/prompt") {
-      this.cur = null; this.turnAgentEl = null;
+      this.cur = null; this.turnEls = [];
       const blocks = msg.params.prompt || [];
       const el = h("div", { class: "msg user" }, blocks.map((c) => c.text ?? "").join(""));
       for (const c of blocks) { const im = imageOf(c); if (im) el.append(this.figure(im) ?? h("div", {}, `[image: ${im.alt}]`)); }
@@ -791,7 +791,7 @@ class Chat {
         const role = u.sessionUpdate === "user_message_chunk" ? "user" : "agent";
         if (!this.cur || this.cur.role !== role) {
           this.cur = { role, seg: null, el: h("div", { class: `msg ${role} md` }) }; this.log.append(this.cur.el);
-          if (role === "agent") { this.cur.el._md = ""; this.cur.el.append(this.sayBtn(this.cur.el)); this.turnAgentEl = this.cur.el; }
+          if (role === "agent") { this.cur.el._md = ""; this.cur.el.append(this.sayBtn(this.cur.el)); (this.turnEls ||= []).push(this.cur.el); }
         }
         if (role === "agent" && u.content?.type === "text") this.cur.el._md += u.content.text ?? "";
         const c = u.content || {}; const im = imageOf(c);
@@ -836,12 +836,13 @@ class Chat {
     b.addEventListener("pointerdown", (e) => e.preventDefault()); // keep the keyboard / text focus where it is
     return b;
   }
-  /** A turn finished: read its final reply when "Read replies aloud" is on; hands-free listens again afterwards. */
+  /** A turn finished: read its reply (all of its text, tool calls left out) when "Read replies aloud" is on; hands-free
+   *  listens again afterwards. */
   readAloud() {
-    const el = this.turnAgentEl;
-    if (!VP.on("read") || !el?.isConnected || !el._md?.trim() || document.visibilityState !== "visible") return;
+    const els = (this.turnEls || []).filter((e) => e.isConnected && e._md?.trim()), el = els.at(-1);
+    if (!VP.on("read") || !el || document.visibilityState !== "visible") return;
     if (Dictation.on) return; // you're already talking
-    Speech.speak(el._md, { el, done: (natural) => {
+    Speech.speak(els.map((e) => e._md).join("\n\n"), { el, done: (natural) => {
       if (natural && VP.on("handsfree") && !this.closed && chat === this && !this.busy && !Dictation.on && Voice.inputMode() && Voice.inputMode() !== "setup") Dictation.toggle(this, { auto: true });
     } });
   }
