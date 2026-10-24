@@ -12,18 +12,18 @@ import { LiveSession } from "../dist/session.js";
 
 const CHROME = [process.env.CHROME_PATH, "/usr/bin/google-chrome", "/usr/bin/chromium", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"].find((p) => p && existsSync(p));
 const MOCK = new URL("./mock-agent.mjs", import.meta.url).pathname;
-let h, base, root, data, port, hangInit, hangLoad;
+let h, base, root, data, port, hangInit, hangLoad, gate;
 const TIMEOUT = LiveSession.START_TIMEOUT_MS;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const cfg = () => configFromEnv({ HEARTH_PORT: String(port), HEARTH_DATA_DIR: data, HEARTH_ROOTS: root, HEARTH_AGENTS_FILE: join(data, "agents.json"), HEARTH_IDENTITY: "single:me", HEARTH_PASSWORD: "off" });
 before(async () => {
   root = mkdtempSync(join(tmpdir(), "hearth-sroot-")); mkdirSync(join(root, "p"));
   data = mkdtempSync(join(tmpdir(), "hearth-sdata-"));
-  hangInit = join(data, "hang-init"); hangLoad = join(data, "hang-load");
+  hangInit = join(data, "hang-init"); hangLoad = join(data, "hang-load"); gate = join(data, "init-gate");
   const a = (id, env) => ({ id, name: id, detect: [process.execPath], command: process.execPath, args: [MOCK], env });
   writeFileSync(join(data, "agents.json"), JSON.stringify([
     a("plain", {}), a("load", { MOCK_LOAD_SESSION: "1" }), a("slow", { MOCK_LOAD_SESSION: "1", MOCK_SLOW_START: "1200" }),
-    a("hang", { MOCK_LOAD_SESSION: "1", MOCK_HANG_INIT: hangInit, MOCK_HANG_LOAD: hangLoad }),
+    a("hang", { MOCK_LOAD_SESSION: "1", MOCK_HANG_INIT: hangInit, MOCK_HANG_LOAD: hangLoad, MOCK_INIT_GATE: gate }),
   ]));
   port = 20000 + Math.floor(Math.random() * 20000);
   h = new Hearth(cfg()); await h.listen(); base = `http://127.0.0.1:${port}`;
@@ -80,26 +80,38 @@ test("a slow start: every client sees 'starting' (also one that connects meanwhi
 });
 
 test("a start that hangs times out with a visible error, leaves no agent behind, and the next send works", async () => {
-  LiveSession.START_TIMEOUT_MS = 2000;   // the hang must trip it, a normal (slow CI runner) start must not
+  // Short timeouts only for the steps that must hang; every step that must succeed runs under the default (minutes), so
+  // a loaded CI runner (macOS Intel) can't trip it. Each step reads the timeout when it starts, so the mock holds its
+  // initialize answer (MOCK_INIT_GATE) while the test sets 2 s for the session/load that follows, and says when that
+  // load arrived (MOCK_HANG_LOAD.got) so the fresh process Hearth then starts gets the default again.
+  const waitFor = async (f, what, gone = false) => {
+    for (let i = 0; i < 1500 && existsSync(f) === gone; i++) await sleep(20);
+    assert.equal(existsSync(f), !gone, what);
+  };
   try {
     const id = await create("hang"); const l = h.live.get(id); await l.ensureRunning(); await stopAgent(l);
-    writeFileSync(hangInit, "");
+    LiveSession.START_TIMEOUT_MS = 2000; writeFileSync(hangInit, "");
     const s = await ws(id);
     s.send(JSON.stringify({ type: "prompt", text: "into the void" }));
     const e = await s.until((m) => m.type === "error", "error");
     assert.match(e.message, /couldn't start the agent: the agent didn't answer initialize within/);
     assert.equal(l.alive, false); assert.equal(l.meta.state, "stopped"); assert.equal(l.turnActive, false);
-    rmSync(hangInit);
+    rmSync(hangInit); LiveSession.START_TIMEOUT_MS = TIMEOUT;
     // session/load hangs: Hearth gives up on reloading and starts the agent fresh so the message still goes
-    writeFileSync(hangLoad, "");
+    writeFileSync(hangLoad, ""); writeFileSync(gate, "");
     s.send(JSON.stringify({ type: "prompt", text: "try again" }));
+    await waitFor(`${gate}.waiting`, "the agent got initialize (answered under the default timeout)");
+    LiveSession.START_TIMEOUT_MS = 2000; rmSync(gate); writeFileSync(`${gate}.go`, "");
+    await waitFor(`${gate}.go`, "initialize answered", true);
+    await waitFor(`${hangLoad}.got`, "the agent got session/load (2 s to answer, and it won't)");
+    LiveSession.START_TIMEOUT_MS = TIMEOUT;
     await s.until((m) => m.type === "prompt_done", "done after the fallback");
     assert.equal(prompts(id).at(-1), "try again");
     const ev = h.store.read(l.meta).map((x) => x.msg?.event).filter(Boolean);
     assert.ok(ev.includes("session_load_failed") && ev.includes("context_reset"), ev.join());
     rmSync(hangLoad);
     s.close();
-  } finally { LiveSession.START_TIMEOUT_MS = TIMEOUT; }
+  } finally { LiveSession.START_TIMEOUT_MS = TIMEOUT; for (const f of [gate, `${gate}.go`, `${gate}.waiting`, `${hangLoad}.got`]) rmSync(f, { force: true }); }
 });
 
 test("browser: 'Starting the agent…' while it starts; a send while disconnected waits and goes after reconnecting", { skip: !CHROME && "no Chrome" }, async () => {

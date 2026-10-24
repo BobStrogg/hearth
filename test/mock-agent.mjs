@@ -88,6 +88,15 @@ serve((conn) => ({
   async initialize() {
     if (process.env.MOCK_SLOW_START) await new Promise((r) => setTimeout(r, Number(process.env.MOCK_SLOW_START)));
     if (process.env.MOCK_HANG_INIT && existsSyncM(process.env.MOCK_HANG_INIT)) await new Promise(() => {}); // never answers
+    // MOCK_INIT_GATE=<file>: while it exists, say "<file>.waiting" and hold the initialize answer until "<file>.go"
+    // appears (a test sets Hearth's start timeout for the NEXT step while this one waits, so a slow runner can't trip it).
+    const gate = process.env.MOCK_INIT_GATE;
+    if (gate && existsSyncM(gate)) {
+      const { writeFileSync, rmSync } = await import("node:fs");
+      writeFileSync(`${gate}.waiting`, String(process.pid));
+      while (!existsSyncM(`${gate}.go`)) await new Promise((r) => setTimeout(r, 20));
+      rmSync(`${gate}.waiting`, { force: true }); rmSync(`${gate}.go`, { force: true });
+    }
     return { protocolVersion: acp.PROTOCOL_VERSION, agentCapabilities: { loadSession: LOAD, sessionCapabilities: { ...(LIST ? { list: {} } : {}), ...(RESUME ? { resume: {} } : {}) } }, authMethods: [], agentInfo: { name: "mock-agent", version: "1" } };
   },
   async newSession({ cwd }) { const id = `mock-${++n}-${process.pid}`; const st = fresh(cwd); sessions.set(id, st);
@@ -113,7 +122,9 @@ serve((conn) => ({
     sessions.set(sessionId, fresh(cwd)); attach(sessionId); return {};
   },
   async loadSession({ sessionId, cwd }) {
-    if (process.env.MOCK_HANG_LOAD && existsSyncM(process.env.MOCK_HANG_LOAD)) await new Promise(() => {}); // a wedged session/load
+    if (process.env.MOCK_HANG_LOAD && existsSyncM(process.env.MOCK_HANG_LOAD)) { // a wedged session/load (says so in "<file>.got")
+      (await import("node:fs")).writeFileSync(`${process.env.MOCK_HANG_LOAD}.got`, String(process.pid)); await new Promise(() => {});
+    }
     sessions.set(sessionId, fresh(cwd)); attach(sessionId);
     if (LOAD_FAIL) throw acp.RequestError.internalError({}, "load exploded after attaching");
     if (LATE && STORE[sessionId]) {
