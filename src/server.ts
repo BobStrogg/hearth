@@ -21,6 +21,7 @@ import { MAX_AUDIO_BYTES, Voice, VoiceError } from "./voice.js";
 import { DEFAULT_PUSH_HOSTS, endpointOk, Push, replyTail, snippet, validSubscription } from "./push.js";
 const HISTORY_TURNS = 8;
 import { dedupeFanout, type SessionMeta, Store } from "./store.js";
+import { handleMcp } from "./mcp.js";
 
 export interface Config extends AuthConfig {
   port: number;
@@ -44,6 +45,13 @@ export interface Config extends AuthConfig {
   pushHosts: string[];
   /** Voice on this computer: speech to text (whisper.cpp) and text to speech for browsers that can't. HEARTH_VOICE=off disables it. */
   voice: boolean;
+  /**
+   * Shared secret for the streamable-HTTP MCP endpoint at /mcp. Unset, or shorter than 16 characters,
+   * or containing characters that don't fit an env file and a header: the endpoint stays off.
+   */
+  mcpToken?: string;
+  /** Identity that owns sessions opened over MCP. When unset, a single: identity is used. */
+  mcpUser?: string;
 }
 
 export function configFromEnv(env = process.env): Config {
@@ -72,6 +80,8 @@ export function configFromEnv(env = process.env): Config {
     password: env.HEARTH_PASSWORD ?? "off",
     unlockTtlHours: Number(env.HEARTH_UNLOCK_TTL_HOURS ?? 12),
     allowedOrigins: list(env.HEARTH_ALLOWED_ORIGINS).length ? list(env.HEARTH_ALLOWED_ORIGINS) : [`http://127.0.0.1:${port}`, `http://localhost:${port}`],
+    mcpToken: env.HEARTH_MCP_TOKEN?.trim() || undefined,
+    mcpUser: env.HEARTH_MCP_USER?.trim() || undefined,
   };
 }
 
@@ -241,6 +251,24 @@ export class Hearth {
   }
 
   private get variantsFile() { return join(this.cfg.dataDir, "agent-variants.json"); }
+  /** Live bookkeeping for a stored session, creating it if this process hasn't touched it yet. */
+  openSession(m: SessionMeta): LiveSession { return this.liveFor(m); }
+  /**
+   * What GET /api/agents returns: each agent, then its derived entries (profiles, discovered backends).
+   * The plain entry is `hidden` when a derived one is what it would start anyway. `path` is omitted.
+   */
+  async listAgentCatalog(): Promise<Record<string, unknown>[]> {
+    const out: Record<string, unknown>[] = [];
+    for (const p of probe(this.agents)) {
+      const a = this.agents.find((x) => x.id === p.id)!;
+      const v = p.installed && (a.discover || a.profiles?.length) ? await this.variantsOf(a).catch(() => null) : null;
+      out.push({ ...p, path: undefined, deep: this.deepCache.get(p.id), ...(v?.coversDefault ? { hidden: true } : {}) });
+      const ready = new Set(v?.entries.map((e) => e.id));
+      for (const e of v?.entries ?? []) out.push({ id: e.id, name: e.name, installed: true, status: p.status, parent: a.id, ...(e.profile !== undefined ? { profile: e.profile } : {}), deep: this.deepCache.get(e.id) });
+      for (const e of this.knownVariants.values()) if (e.parent === a.id && !ready.has(e.id)) out.push({ id: e.id, name: e.name, installed: false, status: p.status, parent: a.id });
+    }
+    return out;
+  }
   /** A built-in/agents.json agent, or a derived entry (e.g. "goose.custom_cloudflare") seen before. */
   agentById(id: unknown): AgentDef | undefined {
     return typeof id === "string" ? this.agents.find((a) => a.id === id) ?? this.knownVariants.get(id) : undefined;
@@ -315,6 +343,7 @@ export class Hearth {
     if (!this.auth.hostOk(q)) return this.send(s, 421, { error: "host not allowed" });
     const url = new URL(q.url ?? "/", "http://x");
     if (url.pathname === "/healthz") return this.send(s, 200, { ok: true, version: VERSION, permission: permissionSummary() });
+    if (url.pathname === "/mcp" || url.pathname === "/mcp/") return handleMcp(this, q, s);
     if (!url.pathname.startsWith("/api/")) return this.static(url.pathname, s);
 
     const who = await this.auth.identify(q);
@@ -352,19 +381,7 @@ export class Hearth {
         const r = await deepProbe(a); this.deepCache.set(a.id, r);
         return this.send(s, 200, r);
       }
-      // Each agent, then its derived entries (e.g. "Goose · Cloudflare Workers AI"). The plain entry is `hidden` from the
-      // new-session picker when a derived one is what it would start anyway; derived entries that aren't ready right now
-      // stay listed as not installed, so their sessions still show a name.
-      const out: Record<string, unknown>[] = [];
-      for (const p of probe(this.agents)) {
-        const a = this.agents.find((x) => x.id === p.id)!;
-        const v = p.installed && (a.discover || a.profiles?.length) ? await this.variantsOf(a).catch(() => null) : null;
-        out.push({ ...p, path: undefined, deep: this.deepCache.get(p.id), ...(v?.coversDefault ? { hidden: true } : {}) });
-        const ready = new Set(v?.entries.map((e) => e.id));
-        for (const e of v?.entries ?? []) out.push({ id: e.id, name: e.name, installed: true, status: p.status, parent: a.id, ...(e.profile !== undefined ? { profile: e.profile } : {}), deep: this.deepCache.get(e.id) });
-        for (const e of this.knownVariants.values()) if (e.parent === a.id && !ready.has(e.id)) out.push({ id: e.id, name: e.name, installed: false, status: p.status, parent: a.id });
-      }
-      return this.send(s, 200, out);
+      return this.send(s, 200, await this.listAgentCatalog());
     }
     const em = /^\/api\/agents\/([a-z0-9_.-]+)\/sessions$/.exec(url.pathname);
     if (em && q.method === "GET") {
