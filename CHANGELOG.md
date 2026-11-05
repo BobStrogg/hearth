@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+
+## 0.8.0
 - Optional MCP endpoint at `/mcp` on the same port as the web UI (streamable HTTP). Off until `HEARTH_MCP_TOKEN` is
   set. A remote client can list agents, open and rename and close sessions, send a prompt, and poll for the reply.
   `send_prompt` returns as soon as the prompt is accepted or queued; it does not wait for the agent.
