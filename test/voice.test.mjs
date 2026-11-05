@@ -74,7 +74,11 @@ before(async () => {
   await h.listen(); base = `http://127.0.0.1:${port}`;
 });
 after(async () => { await h?.close(); });
-const post = (path, body, headers = {}) => fetch(base + path, { method: "POST", headers: { origin: base, "x-hearth-csrf": "1", ...headers }, body });
+const post = async (path, body, headers = {}) => {
+  const go = () => fetch(base + path, { method: "POST", headers: { origin: base, "x-hearth-csrf": "1", ...headers }, body });
+  // macOS Intel (Node 24) has reset this socket once mid-upload; the server is still up, so try the request again.
+  try { return await go(); } catch (e) { if (e?.cause?.code !== "ECONNRESET") throw e; return go(); }
+};
 
 test("GET /api/voice says what this computer can do; /api/me advertises voice", { skip: WIN && "shell stand-ins" }, async () => {
   const c = await (await fetch(base + "/api/voice")).json();
