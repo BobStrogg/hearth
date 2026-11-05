@@ -106,3 +106,7 @@ MCP session id).
 
 Supported protocol versions: `2025-03-26`, `2025-06-18`, `2025-11-25` (the `initialize` handshake), and `2026-07-28`
 (`server/discover`, then the same tools). A missing `MCP-Protocol-Version` header is treated as `2025-03-26`.
+
+`tools/list`, `prompts/list`, and `resources/list` include `ttlMs: 0` and `cacheScope: "private"`. Protocol
+`2026-07-28` requires both (a missing `ttlMs` is not a number, so a client rejects the whole result). Tool argument
+schemas are unchanged, including `poll_events.since` as an integer.

@@ -191,6 +191,17 @@ const str = (description: string) => ({ type: "string", description });
 const bool = (description: string) => ({ type: "boolean", description });
 const num = (description: string) => ({ type: "integer", minimum: 0, description });
 
+/**
+ * 2026-07-28 list results are a CacheableResult: `ttlMs` (a number, ≥ 0) and
+ * `cacheScope` are required. A portal that validates tools/list with that schema
+ * rejects a missing `ttlMs` as `invalid_type` / expected number — the whole sync
+ * fails before it looks at tool schemas. 0 means the list is already stale.
+ * `private` matches server/discover: the catalog is the same for every caller,
+ * and the endpoint is still credential-gated. 2025 results are an open object,
+ * so the same fields are sent on every list response; older clients ignore them.
+ */
+const LIST_CACHE = { ttlMs: 0, cacheScope: "private" as const };
+
 export const MCP_TOOLS: ToolDef[] = [
   { name: "list_agents", description: "List ACP agents Hearth can start, including profiles and variants it already knows (for example Goose providers). Prefer an entry with installed true. Also returns the folders (roots) create_session may use.", inputSchema: { type: "object", properties: {} }, annotations: { readOnlyHint: true, openWorldHint: false } },
   { name: "list_sessions", description: "List this MCP user's Hearth sessions: id, title, agent, folder, and whether a turn is running. Closed sessions are omitted unless includeEnded is true.", inputSchema: { type: "object", properties: { includeEnded: bool("Include sessions that were closed.") } }, annotations: { readOnlyHint: true, openWorldHint: false } },
@@ -525,13 +536,13 @@ export async function handleMcp(h: McpHost, req: IncomingMessage, res: ServerRes
       return;
     }
     if (msg.method === "server/discover") {
-      finish(200, { supportedVersions: [...MCP_PROTOCOL_VERSIONS], capabilities: { tools: { listChanged: false } }, instructions: MCP_INSTRUCTIONS, ttlMs: 0, cacheScope: "private" });
+      finish(200, { supportedVersions: [...MCP_PROTOCOL_VERSIONS], capabilities: { tools: { listChanged: false } }, instructions: MCP_INSTRUCTIONS, ...LIST_CACHE });
       return;
     }
     if (msg.method === "ping") { if (era === "modern") { fail(404, -32601, "Method not found: ping"); return; } finish(200, {}); return; }
-    if (msg.method === "tools/list") { finish(200, params.cursor ? { tools: [] } : { tools: MCP_TOOLS }); return; }
-    if (msg.method === "prompts/list") { finish(200, { prompts: [] }); return; }
-    if (msg.method === "resources/list") { finish(200, { resources: [] }); return; }
+    if (msg.method === "tools/list") { finish(200, { ...LIST_CACHE, tools: params.cursor ? [] : MCP_TOOLS }); return; }
+    if (msg.method === "prompts/list") { finish(200, { ...LIST_CACHE, prompts: [] }); return; }
+    if (msg.method === "resources/list") { finish(200, { ...LIST_CACHE, resources: [] }); return; }
     if (msg.method === "tools/call") {
       const name = params.name;
       if (typeof name !== "string" || !MCP_TOOLS.some((t) => t.name === name)) { finish(200, { content: [{ type: "text", text: "Unknown tool." }], isError: true }); return; }
