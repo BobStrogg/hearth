@@ -35,6 +35,18 @@ Tips:
 - Require a passkey or hardware key in the Access policy, because agents can run commands as you.
 - Keep sessions short (for example 12h). The Hearth password unlock adds a second factor tied to the machine.
 
+## MCP on the same hostname
+
+A remote MCP client uses the same tunnel: `https://agents.example.com/mcp`. Leave Access in front of that path.
+
+Hearth's own check on `/mcp` is `HEARTH_MCP_TOKEN` (see [mcp.md](mcp.md)), sent as `Authorization: Bearer …` or
+`X-Hearth-Mcp-Token`. It does not read the Access JWT. For a client that can only send static headers, create an
+Access **service token**, allow it on this application's policy (Service Auth), and give the client both the service
+token headers (`CF-Access-Client-Id`, `CF-Access-Client-Secret`) and the Hearth bearer. Service-token JWTs often have
+no email, so set `HEARTH_MCP_USER` to the identity that should own those sessions.
+
+The computer has to be awake and the tunnel connected. Hearth still binds to 127.0.0.1.
+
 ## Files and notifications behind Access
 
 - The file browser uploads in 8 MB requests, well under the 100 MB request-body limit of Cloudflare's free plan, so

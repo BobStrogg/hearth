@@ -9,6 +9,7 @@ import { serviceManager } from "./service.js";
 import { cmpVer, latestRelease, plan } from "./update.js";
 import { VERSION } from "./version.js";
 import { Voice } from "./voice.js";
+import { mcpDoctorCheck } from "./mcp.js";
 
 type Level = "ok" | "warn" | "fail" | "info";
 export interface Check { level: Level; title: string; fix?: string }
@@ -61,6 +62,7 @@ export async function doctor(opts: { online?: boolean } = {}): Promise<Check[]> 
   } else if (pw === "off") add(id === "cloudflare" ? "warn" : "info", "No password unlock (HEARTH_PASSWORD=off)", id === "cloudflare" ? "Consider HEARTH_PASSWORD=os for a second factor tied to this machine." : undefined);
   else add("ok", "Password unlock: scrypt hash");
   for (const r of cfg.roots) if (!existsSync(r)) add("fail", `Root folder missing: ${r}`, "Fix HEARTH_ROOTS.");
+  const mcp = mcpDoctorCheck(cfg); add(mcp.level, mcp.title, mcp.fix);
 
   // agents
   const found = probe(loadAgents(cfg.agentsFile)).filter((p) => p.installed);

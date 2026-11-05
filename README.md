@@ -80,8 +80,9 @@ hearth hash-password <pw>      make a HEARTH_PASSWORD=scrypt:… value
 ```
 
 `hearth service install` accepts `--port`, `--public-origin`, `--identity`, `--cf-team-domain`, `--cf-aud`,
-`--password`, `--roots`, `--auto-update on|off`, and `--system` (a LaunchDaemon / system unit that needs sudo and runs
-as you at boot).
+`--password`, `--roots`, `--auto-update on|off`, `--mcp-token`, `--mcp-user`, and `--system` (a LaunchDaemon / system
+unit that needs sudo and runs as you at boot). Prefer putting the MCP token in the env file rather than on the command
+line. See [docs/mcp.md](docs/mcp.md).
 
 ## Configuration
 
@@ -119,6 +120,8 @@ An existing `~/.hearth` is kept on every OS. Override with `HEARTH_HOME` / `HEAR
 | `HEARTH_TTS` | `on` | `off` = no computer-side text to speech |
 | `HEARTH_SAY_VOICE` | system voice | macOS `say` voice for computer-side read-aloud (e.g. `Ava (Premium)`) |
 | `HEARTH_PIPER_MODEL` | | Linux: a piper `.onnx` voice (used before espeak-ng when set) |
+| `HEARTH_MCP_TOKEN` | | Shared secret for the MCP endpoint (`/mcp`). Unset means MCP is off. At least 16 characters: letters, digits, and `._~+/=-` |
+| `HEARTH_MCP_USER` | the `single:` identity | Who owns sessions opened over MCP. Required when `HEARTH_IDENTITY` is `header:` or `cloudflare` |
 
 ## Supported agents
 
@@ -185,6 +188,10 @@ the picker when one of these is what it would start anyway. Hearth never reads G
   Apple's, Chrome uses Google's. Choose "This computer (private)" in Voice settings to avoid it.)
 - **Agents run as you.** An agent can do anything your account can, which is why the password unlock is on by default on
   macOS.
+- **MCP.** `/mcp` is off until `HEARTH_MCP_TOKEN` is set. That bearer is a separate credential from the web UI: it does
+  not satisfy the password unlock, and the password cookie does not call MCP. Treat the token like a password. It is
+  the check Grok (or any other MCP client) sends as a static header. Cloudflare Access, if you use it, stays in front
+  of the tunnel. See [docs/mcp.md](docs/mcp.md).
 - **Updates:** release assets are checked against the release's `SHA256SUMS` before anything is installed. The web UI's
   "Update now" button only runs the fixed `hearth update` command (no arbitrary input).
 

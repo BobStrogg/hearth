@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+- Optional MCP endpoint at `/mcp` on the same port as the web UI (streamable HTTP). Off until `HEARTH_MCP_TOKEN` is
+  set. A remote client can list agents, open and rename and close sessions, send a prompt, and poll for the reply.
+  `send_prompt` returns as soon as the prompt is accepted or queued; it does not wait for the agent.
+  `HEARTH_MCP_USER` is the session owner when identity is not `single:`. The bearer is not the web UI login and not a
+  Cloudflare Access check. See `docs/mcp.md`.
+
 ## 0.7.0
 - Goose's providers are agents of their own in the picker. Hearth asks Goose (its ACP extension,
   `_goose/unstable/providers/list`) which providers are set up and lists each as "Goose · <provider>", e.g.
