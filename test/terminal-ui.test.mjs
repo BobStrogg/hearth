@@ -85,3 +85,31 @@ test("#/terminals opens the home screen at the Terminals section; the toolbar ha
   await until(() => page.$eval("section.terms", (e) => { const r = e.getBoundingClientRect(); return r.top >= -1 && r.top < innerHeight; }));
   await page.close();
 });
+
+test("an unreachable computer is reported as unreachable (and retried), not as a gone terminal", async (t) => {
+  if (skip) return t.skip(skip);
+  const page = await browser.newPage(); await page.setViewport({ width: 390, height: 700, isMobile: true, hasTouch: true });
+  page.on("dialog", (d) => d.accept());
+  await page.goto(base + "/#/"); await page.waitForSelector("section.terms");
+  await page.$$eval("section.terms button", (bs) => bs.find((b) => /New terminal/.test(b.textContent)).click());
+  await page.waitForSelector(".xterm-rows"); await until(async () => /\$|#/.test(await screen(page)));
+  const id = await page.evaluate(() => termv.id);
+  // The tunnel goes away: the terminal's API answers like Cloudflare does for an offline origin (530), and sockets can't connect.
+  await page.evaluate((id) => {
+    const realFetch = window.fetch, RealWS = window.WebSocket; window.__down = true;
+    window.fetch = (u, o) => (window.__down && String(u).includes(`/api/terminals/${id}`) ? Promise.resolve(new Response("<h1>Error 1033</h1>", { status: 530, headers: { "content-type": "text/html" } })) : realFetch(u, o));
+    window.WebSocket = class extends RealWS { constructor(u) { super(window.__down ? u.replace("ws/term", "ws/nope") : u); } };
+    termv.ws.close();
+  }, id);
+  const banner = () => page.$eval(".term-banner", (e) => (e.hidden ? "" : e.textContent));
+  await until(async () => /Can.t reach this computer/.test(await banner()), 20000);
+  assert.doesNotMatch(await banner(), /gone/);
+  // It comes back: the retry reattaches by itself and the shell is still there.
+  await page.evaluate(() => { window.__down = false; });
+  await page.$$eval(".term-banner button", (bs) => bs.find((b) => /Retry/.test(b.textContent)).click());
+  await until(async () => (await banner()) === "", 10000);
+  await page.click(".term-host"); await page.keyboard.type("echo back-$((6*7))\n");
+  await until(async () => (await screen(page)).includes("back-42"));
+  await page.evaluate(async (id) => { await fetch(`/api/terminals/${id}?remove=1`, { method: "DELETE", headers: { "x-hearth-csrf": "1" } }); }, id);
+  await page.close();
+});

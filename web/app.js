@@ -46,7 +46,7 @@ async function api(method, path, body) {
   const r = await fetch(path, { method, headers: { "content-type": "application/json", "x-hearth-csrf": "1" }, body: body ? JSON.stringify(body) : undefined, credentials: "same-origin" });
   const j = await r.json().catch(() => ({}));
   if (r.status === 423) { showLock(); throw new Error("locked"); }
-  if (!r.ok) throw new Error(j.error || r.statusText);
+  if (!r.ok) throw Object.assign(new Error(j.error || r.statusText || `HTTP ${r.status}`), { status: r.status });
   return j;
 }
 const ago = (iso) => { const s = (Date.now() - new Date(iso)) / 1000; return s < 60 ? "just now" : s < 3600 ? `${Math.floor(s / 60)}m ago` : s < 86400 ? `${Math.floor(s / 3600)}h ago` : new Date(iso).toLocaleDateString(); };
@@ -1399,7 +1399,7 @@ class TermView {
     this.term.onTitleChange((t) => { if (t && !this.closed) document.title = `${t} · Hearth`; });
     this.ro = new ResizeObserver(() => this.refit()); this.ro.observe(this.host);
     this.refit();
-    this.onVis = () => { if (document.visibilityState === "visible" && (!this.ws || this.ws.readyState > 1) && this.info.state !== "exited") this.connect(); };
+    this.onVis = () => { if (document.visibilityState === "visible" && (!this.ws || this.ws.readyState > 1) && this.info.state !== "exited") { this.retry = 0; this.connect(); } };
     document.addEventListener("visibilitychange", this.onVis);
     this.connect();
     if (!coarse) this.term.focus();
@@ -1432,8 +1432,19 @@ class TermView {
     };
   }
   async gone() {
+    clearTimeout(this.offlineTimer);
+    if (this.closed) return;
     try { const t = await api("GET", `/api/terminals/${this.id}`); this.info = t; if (t.state === "exited") return this.ended(); this.retry = 0; this.connect(); }
-    catch (x) { if (x.message !== "locked") this.show("This terminal is gone (closed, or this computer restarted).", [h("button", { onclick: newTerminal }, "New terminal")]); }
+    catch (x) {
+      if (x.message === "locked" || this.closed) return;
+      if (x.status === 404) return this.show("This terminal is gone (closed, or Hearth restarted).", [h("button", { onclick: newTerminal }, "New terminal")]);
+      // Not a "no such terminal": the computer is asleep or offline, the tunnel is down, or the sign-in expired. The
+      // shell is still running on the computer, so keep trying instead of declaring it gone.
+      this.show("Can't reach this computer right now (asleep, offline, or your sign-in expired). The terminal keeps running there; retrying…",
+        [h("button", { onclick: () => this.gone() }, "Retry now"), h("button", { onclick: () => location.reload() }, "Reload")]);
+      setHeader(this.info.title, { back: true, menu: true, status: "offline" });
+      this.offlineTimer = setTimeout(() => { if (document.visibilityState === "visible") this.gone(); }, 10_000);
+    }
   }
   ended() {
     setHeader(this.info.title, { back: true, menu: true, status: "exited" });
@@ -1442,7 +1453,7 @@ class TermView {
       h("button", { class: "primary", onclick: newTerminal }, "New terminal")]);
   }
   close() {
-    this.closed = true; document.title = "Hearth";
+    this.closed = true; document.title = "Hearth"; clearTimeout(this.offlineTimer);
     try { this.ws?.close(); } catch { /* closed */ }
     if (this.onVis) document.removeEventListener("visibilitychange", this.onVis);
     this.ro?.disconnect(); this.term?.dispose(); this.unmirror?.();

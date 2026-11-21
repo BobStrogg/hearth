@@ -1,6 +1,9 @@
 # Changelog
 
 ## Unreleased
+- Terminals: when the computer can't be reached (asleep, offline, tunnel down, sign-in expired) an open terminal now says so
+  and keeps retrying, instead of claiming the terminal is gone. Only a terminal Hearth really no longer has is reported
+  as gone.
 - A *Terminals* button at the top of the home screen jumps to the terminal list, and `#/terminals` opens the home
   screen there (so a link from elsewhere, like a home dashboard, lands on the list instead of below every session).
 
