@@ -193,6 +193,13 @@ serve((conn) => ({
     if (text.includes("explode")) throw acp.RequestError.internalError({}, "mock agent exploded");
     if (text.includes("slow")) { for (let i = 0, n = text.includes("slowest") ? 300 : 50; i < n && !s.cancelled; i++) await new Promise((r) => setTimeout(r, 100)); if (s.cancelled) return { stopReason: "cancelled" }; }
     for (const w of ["Hello ", "**world**", "!"]) await say(w);
+    // MOCK_PERSIST=1: record the turn in MOCK_STORE, like an agent CLI writing its session history to disk.
+    if (process.env.MOCK_PERSIST === "1" && STORE[sessionId]) {
+      const { writeFileSync } = await import("node:fs");
+      const cur = JSON.parse(readFileSync(process.env.MOCK_STORE, "utf8"));
+      cur[sessionId].history.push({ role: "user", text }, { role: "agent", text: "Hello **world**!" });
+      writeFileSync(process.env.MOCK_STORE, JSON.stringify(cur));
+    }
     return { stopReason: "end_turn" };
   },
 }), acp.ndJsonStream(Writable.toWeb(process.stdout), Readable.toWeb(process.stdin)));
