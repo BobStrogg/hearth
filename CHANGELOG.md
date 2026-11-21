@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+
+## 0.9.0
 - Terminals that stay open on the computer. The home screen lists them (folder, what's in the foreground, last
   activity, how many devices are viewing) with *+ New terminal* and a close button. A terminal is a login shell on a
   real pseudo-terminal owned by the daemon, so closing the page, a dropped connection or switching devices only
