@@ -22,6 +22,8 @@ import { DEFAULT_PUSH_HOSTS, endpointOk, Push, replyTail, snippet, validSubscrip
 const HISTORY_TURNS = 8;
 import { dedupeFanout, type SessionMeta, Store } from "./store.js";
 import { handleMcp } from "./mcp.js";
+import { ensurePtyHelper } from "./pty.js";
+import { TermError, Terminals } from "./terminals.js";
 
 export interface Config extends AuthConfig {
   port: number;
@@ -52,6 +54,12 @@ export interface Config extends AuthConfig {
   mcpToken?: string;
   /** Identity that owns sessions opened over MCP. When unset, a single: identity is used. */
   mcpUser?: string;
+  /** Terminals kept open on this computer (HEARTH_TERMINALS=off disables them; never on Windows). */
+  terminals: boolean;
+  /** Running terminals per user (HEARTH_TERMINALS_MAX, default 10). */
+  terminalsMax: number;
+  /** Close a terminal nobody has used or viewed for this many hours (HEARTH_TERMINAL_IDLE_HOURS, default 72; 0 = never). */
+  terminalIdleHours: number;
 }
 
 export function configFromEnv(env = process.env): Config {
@@ -82,6 +90,9 @@ export function configFromEnv(env = process.env): Config {
     allowedOrigins: list(env.HEARTH_ALLOWED_ORIGINS).length ? list(env.HEARTH_ALLOWED_ORIGINS) : [`http://127.0.0.1:${port}`, `http://localhost:${port}`],
     mcpToken: env.HEARTH_MCP_TOKEN?.trim() || undefined,
     mcpUser: env.HEARTH_MCP_USER?.trim() || undefined,
+    terminals: process.platform !== "win32" && !/^(off|0|false|no)$/i.test(env.HEARTH_TERMINALS ?? ""),
+    terminalsMax: Math.max(1, Math.floor(Number(env.HEARTH_TERMINALS_MAX) || 10)),
+    terminalIdleHours: Math.max(0, Number(env.HEARTH_TERMINAL_IDLE_HOURS ?? 72) || 0),
   };
 }
 
@@ -140,6 +151,8 @@ export class Hearth {
   private rel: { at: number; release?: Release; error?: string } = { at: 0 };
   private updating = 0; private pendingSince = 0; private autoTimer?: NodeJS.Timeout;
   files: Files | null = null; push: Push | null = null; voice: Voice | null = null;
+  /** Terminals that stay open on this computer between visits (null when HEARTH_TERMINALS=off). */
+  terminals: Terminals | null = null;
   /** Agent process groups started by this Hearth (see orphans.ts). */
   readonly agentPids: AgentPids;
   /** Sockets currently looking at a session (tab visible and focused): no push for that session while > 0. */
@@ -158,6 +171,7 @@ export class Hearth {
     } catch { /* none yet */ }
     if (cfg.files) { try { this.files = new Files(cfg.filesRoot, { timeoutMs: cfg.filesTimeoutMs }); } catch { this.files = null; } }
     if (cfg.voice) this.voice = new Voice(cfg.dataDir);
+    if (cfg.terminals) this.terminals = new Terminals({ helper: () => ensurePtyHelper({ home: cfg.dataDir }), max: cfg.terminalsMax, idleMs: cfg.terminalIdleHours * 3600_000 });
     if (cfg.push) {
       // VAPID "sub" must be a mailto: or https: contact; default to this server's public origin.
       const subject = cfg.pushSubject || cfg.allowedOrigins.find((o) => o.startsWith("https://")) || "https://github.com/BobStrogg/hearth";
@@ -235,6 +249,7 @@ export class Hearth {
     clearTimeout(this.autoTimer); clearInterval(this.queueTimer);
     if (process.env.HEARTH_SERVICE) { try { if (readFileSync(pidFile(), "utf8").trim() === String(process.pid)) rmSync(pidFile(), { force: true }); } catch { /* none */ } }
     await Promise.all([...this.live.values()].map((l) => l.shutdown().catch(() => {})));
+    await this.terminals?.shutdown().catch(() => {});
     for (const c of this.wss.clients) c.terminate();
     this.wss.close(); this.server.closeAllConnections(); await new Promise((r) => this.server.close(r));
   }
@@ -351,7 +366,7 @@ export class Hearth {
     const mutating = q.method !== "GET" && q.method !== "HEAD";
     if (mutating && !this.auth.csrfOk(q)) return this.send(s, 403, { error: "csrf/origin check failed" });
 
-    if (url.pathname === "/api/me") return this.send(s, 200, { user: who, needsPassword: this.auth.needsPassword, unlocked: this.auth.unlocked(q, who), files: !!this.files, push: !!this.push, voice: !!this.voice });
+    if (url.pathname === "/api/me") return this.send(s, 200, { user: who, needsPassword: this.auth.needsPassword, unlocked: this.auth.unlocked(q, who), files: !!this.files, push: !!this.push, voice: !!this.voice, terminals: !!this.terminals });
     if (url.pathname === "/api/unlock" && q.method === "POST") {
       const b = await this.body(q);
       if (!(await this.auth.checkPassword(who, String(b.password ?? "")))) return this.send(s, 403, { error: "wrong password" });
@@ -360,6 +375,7 @@ export class Hearth {
     if (!this.auth.unlocked(q, who)) return this.send(s, 423, { error: "locked" });
 
     if (url.pathname.startsWith("/api/files")) return this.filesApi(q, s, url);
+    if (url.pathname === "/api/terminals" || url.pathname.startsWith("/api/terminals/")) return this.terminalsApi(q, s, url, who);
     if (url.pathname.startsWith("/api/push")) return this.pushApi(q, s, url, who);
     if (url.pathname.startsWith("/api/voice")) return this.voiceApi(q, s, url);
     if (url.pathname === "/api/version" && q.method === "GET") return this.send(s, 200, await this.versionInfo(url.searchParams.get("check") === "1"));
@@ -460,6 +476,35 @@ export class Hearth {
       }
     }
     return this.send(s, 404, { error: "not found" });
+  }
+
+  /**
+   * Terminals: GET list, POST create {cwd?, title?, cols?, rows?}, PATCH /:id {title}, DELETE /:id close (waits for it
+   * to end; ?remove=1, or an already-ended terminal, also drops it from the list). Output and keystrokes go over /ws/term.
+   */
+  private async terminalsApi(q: IncomingMessage, s: ServerResponse, url: URL, who: string) {
+    const T = this.terminals;
+    if (!T) return this.send(s, 404, { error: "terminals are off on this computer (HEARTH_TERMINALS=off)" });
+    const id = url.pathname.slice("/api/terminals/".length);
+    try {
+      if (url.pathname === "/api/terminals") {
+        if (q.method === "GET") return this.send(s, 200, await T.listDetailed(who));
+        if (q.method === "POST") {
+          const b = await this.body(q);
+          const cwd = typeof b.cwd === "string" && b.cwd ? resolve(b.cwd) : this.cfg.roots[0];
+          if (!this.cfg.roots.some((r) => within(r, cwd))) return this.send(s, 403, { error: "outside allowed roots" });
+          return this.send(s, 201, T.create(who, { cwd, title: typeof b.title === "string" ? b.title : undefined, cols: Number(b.cols), rows: Number(b.rows) }).info());
+        }
+      } else if (/^[a-f0-9]{16}$/.test(id)) {
+        if (q.method === "GET") return this.send(s, 200, T.need(who, id).info());
+        if (q.method === "PATCH") { const b = await this.body(q); return this.send(s, 200, T.rename(who, id, b.title)); }
+        if (q.method === "DELETE") return this.send(s, 200, await T.close(who, id, { remove: url.searchParams.get("remove") === "1" }));
+      } else return this.send(s, 404, { error: "No such terminal." });
+      return this.send(s, 405, { error: "method not allowed" });
+    } catch (e) {
+      if (e instanceof TermError) return this.send(s, e.status, { error: e.message });
+      throw e;
+    }
   }
 
   private async filesApi(q: IncomingMessage, s: ServerResponse, url: URL) {
@@ -607,16 +652,36 @@ export class Hearth {
   private async upgrade(req: IncomingMessage, sock: import("node:net").Socket, head: Buffer) {
     const deny = (code: number, msg: string) => { sock.end(`HTTP/1.1 ${code} ${msg}\r\n\r\n`); };
     const url = new URL(req.url ?? "/", "http://x");
-    if (url.pathname !== "/ws") return deny(404, "Not Found");
+    if (url.pathname !== "/ws" && url.pathname !== "/ws/term") return deny(404, "Not Found");
     if (!this.auth.hostOk(req) || !this.auth.originOk(req)) return deny(403, "Forbidden");
     const who = await this.auth.identify(req);
     if (!who) return deny(401, "Unauthorized");
     if (!this.auth.unlocked(req, who)) return deny(423, "Locked");
+    if (url.pathname === "/ws/term") {
+      const t = this.terminals?.get(who, url.searchParams.get("id"));
+      if (!t) return deny(404, "Not Found");
+      return this.wss.handleUpgrade(req, sock, head, (ws) => this.attachTerminal(ws, t));
+    }
     const id = url.searchParams.get("session") ?? "";
     const m = /^[a-f0-9-]{36}$/.test(id) ? (this.live.get(id)?.meta.owner === who ? this.live.get(id)!.meta : this.store.get(who, id)) : null;
     if (!m || m.owner !== who) return deny(404, "Not Found");
     const since = Number(url.searchParams.get("since") ?? 0) || 0;
     this.wss.handleUpgrade(req, sock, head, (ws) => this.attach(ws, m, since));
+  }
+
+  /** One viewer of a terminal: binary frames out are output; in, binary or {type:"input",data} is keystrokes, {type:"resize",cols,rows} resizes. */
+  private attachTerminal(ws: WebSocket, t: import("./terminals.js").Term) {
+    const detach = t.attach({ send: (d) => { if (ws.readyState === ws.OPEN) ws.send(d); } });
+    const ping = setInterval(() => { if (ws.readyState === ws.OPEN) ws.ping(); }, 25_000); ping.unref();
+    ws.on("close", () => { clearInterval(ping); detach(); });
+    ws.on("error", () => {});
+    ws.on("message", (raw, isBinary) => {
+      if (isBinary) return t.input(Buffer.isBuffer(raw) ? raw : Buffer.from(raw as ArrayBuffer));
+      let m: { type?: string; data?: unknown; cols?: unknown; rows?: unknown };
+      try { m = JSON.parse(String(raw)); } catch { return; }
+      if (m.type === "input" && typeof m.data === "string") t.input(m.data);
+      else if (m.type === "resize") t.resize(Number(m.cols), Number(m.rows));
+    });
   }
 
   private attach(ws: WebSocket, m: SessionMeta, since: number) {

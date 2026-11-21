@@ -66,15 +66,8 @@ export function ensureLauncher(o: { home?: string; platform?: NodeJS.Platform; r
   // macOS: /usr/bin/cc exists even without the Command Line Tools and would pop up an installer; check for them first.
   // /usr/bin/xcrun and /usr/bin/cc are shims that do the same when the tools are missing, so they only run once the
   // developer directory and a clang in it are known to exist, and there is no fallback to /usr/bin/cc.
-  let cc = o.cc;
-  if (!cc) {
-    const ex = o.exists ?? existsSync;
-    const noTools = { path: null, built: false, note: "the Xcode Command Line Tools aren't installed (xcode-select --install), so Hearth runs directly and macOS may ask for folder permission again after each Node.js update" };
-    const d = r("/usr/bin/xcode-select", ["-p"]); const dev = d.status === 0 ? d.out.trim().split("\n")[0] : "";
-    if (!dev || !ex(dev) || ![join(dev, "usr", "bin", "clang"), join(dev, "Toolchains", "XcodeDefault.xctoolchain", "usr", "bin", "clang")].some((x) => ex(x))) return noTools;
-    const f = r("/usr/bin/xcrun", ["--find", "clang"]); cc = f.status === 0 ? f.out.trim().split("\n")[0] : "";
-    if (!cc || !ex(cc)) return noTools;
-  }
+  const cc = o.cc ?? macCompiler(r, o.exists ?? existsSync);
+  if (!cc) return { path: null, built: false, note: "the Xcode Command Line Tools aren't installed (xcode-select --install), so Hearth runs directly and macOS may ask for folder permission again after each Node.js update" };
   mkdirSync(join(bin, ".."), { recursive: true, mode: 0o700 });
   const src = `${bin}.c`, tmp = `${bin}.new`;
   writeFileSync(src, LAUNCHER_C, { mode: 0o644 });
@@ -87,3 +80,15 @@ export function ensureLauncher(o: { home?: string; platform?: NodeJS.Platform; r
   chmodSync(tmp, 0o755); renameSync(tmp, bin); writeFileSync(stamp, want + "\n", { mode: 0o644 });
   return { path: bin, built: true };
 }
+/**
+ * The Command Line Tools' clang on macOS, or null without them. /usr/bin/cc, /usr/bin/xcrun and friends are shims that
+ * pop up an installer when the tools are missing, so they only run once the developer directory and a clang in it are
+ * known to exist, and there is no fallback to /usr/bin/cc.
+ */
+export function macCompiler(r: Run = run, ex: (p: string) => boolean = existsSync): string | null {
+  const d = r("/usr/bin/xcode-select", ["-p"]); const dev = d.status === 0 ? d.out.trim().split("\n")[0] : "";
+  if (!dev || !ex(dev) || ![join(dev, "usr", "bin", "clang"), join(dev, "Toolchains", "XcodeDefault.xctoolchain", "usr", "bin", "clang")].some((x) => ex(x))) return null;
+  const f = r("/usr/bin/xcrun", ["--find", "clang"]); const cc = f.status === 0 ? f.out.trim().split("\n")[0] : "";
+  return cc && ex(cc) ? cc : null;
+}
+export type { Run as CompileRun };

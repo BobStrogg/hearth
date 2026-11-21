@@ -34,6 +34,13 @@ Cursor and Devin.
   Linux). In a Tesla the browser's microphone needs software 2026.26 or later on an AMD Ryzen car. Set it up from *Voice settings* (⋯ in a session) or with `hearth voice install`. Settings are per device.
 - **Files in the browser.** Browse, download and upload files (📁 Files) in your home folder, with nothing to install.
   Downloads stream; uploads are chunked and resume after a dropped connection.
+- **Terminals that stay open.** *+ New terminal* on the home screen opens a login shell on the computer, in the
+  browser (xterm.js, served by Hearth). It keeps running when you close the page or lose the connection; the list
+  shows each terminal, what is running in it (e.g. `devin`) and when it was last used, and opening it again replays
+  its recent output. The ✕ (or *Close terminal* in its ⋯ menu) hangs it up like closing a terminal window and kills
+  anything still left in it a few seconds later. On phones a key row adds Esc, Tab, Ctrl, arrows, ^C and ^D.
+  Terminals end when Hearth restarts. Needs a C compiler once to build a tiny pty helper (Xcode Command Line Tools on
+  macOS, `cc` on Linux); not available on Windows.
 - **Updates itself.** `hearth update` (and the optional auto-update) pulls a verified release from GitHub, restarts the
   service and rolls back if the health check fails. The web UI shows the installed version and an "Update now" button.
 - **Private by design.** It listens on 127.0.0.1 only. Each session belongs to the identity that created it. Host,
@@ -111,6 +118,9 @@ An existing `~/.hearth` is kept on every OS. Override with `HEARTH_HOME` / `HEAR
 | `HEARTH_AUTO_UPDATE` | `off` | `on` = daily check against GitHub Releases; restarts when idle (force after 24h); rolls back if `/healthz` fails |
 | `HEARTH_FILES` | `on` | `off` hides the file browser and its API |
 | `HEARTH_FILES_ROOT` | `$HOME` | The only folder the file browser can see (symlinks are resolved; links leading out of it are hidden and refused) |
+| `HEARTH_TERMINALS` | `on` | `off` turns terminals and `/api/terminals` off (always off on Windows) |
+| `HEARTH_TERMINALS_MAX` | `10` | Running terminals per user |
+| `HEARTH_TERMINAL_IDLE_HOURS` | `72` | A terminal nobody is viewing and nothing has used (no input or output) for this long is closed; `0` = never |
 | `HEARTH_PUSH` | `on` | `off` turns notifications off. When on, nothing is sent until a device opts in |
 | `HEARTH_PUSH_SUBJECT` | first `https://` allowed origin | VAPID contact (`mailto:` or `https:` URL) sent to push services |
 | `HEARTH_PUSH_HOSTS` | | Extra push-service hosts to allow (Google, Mozilla, Apple and Microsoft are built in) |
@@ -186,6 +196,10 @@ the picker when one of these is what it would start anyway. Hearth never reads G
   else. No macOS microphone or Speech Recognition permission is involved: the browser records, and whisper.cpp and
   `say` only read and write files. (The browser's built-in recognition is the browser vendor's service: Safari uses
   Apple's, Chrome uses Google's. Choose "This computer (private)" in Voice settings to avoid it.)
+- **Terminals:** `/api/terminals` and `/ws/term` sit behind the same identity, unlock, Origin and CSRF checks, and a
+  terminal belongs to the identity that opened it. A terminal is a shell as your account (no more than an agent can
+  already do); new ones start inside `HEARTH_ROOTS`. `HEARTH_*` settings (the MCP token, the password hash) are left
+  out of its environment. Its output is kept in memory only (512 KB per terminal, for replay), never on disk.
 - **Agents run as you.** An agent can do anything your account can, which is why the password unlock is on by default on
   macOS.
 - **MCP.** `/mcp` is off until `HEARTH_MCP_TOKEN` is set. That bearer is a separate credential from the web UI: it does
