@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+
+## 0.9.2
 - Terminals: the phone keyboard sliding in or out, or a rotation, now sends the computer one resize when the layout
   settles instead of one per animation frame, and the same size is never re-sent. Full-screen programs (CLI agents such
   as Devin) repaint everything on each resize, so the terminal no longer replays its whole screen several times over.
