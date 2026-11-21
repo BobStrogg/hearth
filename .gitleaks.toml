@@ -1,0 +1,8 @@
+# Gitleaks' default rules, minus vendored third-party bundles: minified xterm.js has identifier runs
+# (e.g. "FourKeyMap=…") that the generic-api-key rule mistakes for keys.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "vendored minified libraries"
+paths = ['''^web/xterm(-fit)?\.js$''']

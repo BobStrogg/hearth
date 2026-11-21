@@ -300,8 +300,8 @@ test("poll reads the reply, permissions can be answered, rename and close work",
   assert.equal(ended.sessions.some((s) => s.id === id && s.state === "exited"), true);
 });
 
-test("terminals over MCP: list, read and close", { skip: process.platform === "win32" }, async () => {
-  if (h.terminals.status().available === false) return;
+test("terminals over MCP: list, read and close", { skip: process.platform === "win32" && "no terminals on Windows" }, async (ctx) => {
+  const st = h.terminals.status(); if (st.available === false) return ctx.skip(st.note);
   h.terminals.o.shell = () => ({ command: "/bin/sh", args: ["-i"] }); h.terminals.o.graceMs = 300;
   const t = h.terminals.create("mcp@example.com", { cwd: proj, title: "Devin CLI" });
   t.input("echo mcp-sees-$((20+1))\n");

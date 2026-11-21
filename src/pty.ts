@@ -147,7 +147,11 @@ export function ensurePtyHelper(o: { home?: string; platform?: NodeJS.Platform; 
   const src = `${bin}.c`, tmp = `${bin}.new`;
   writeFileSync(src, PTY_C, { mode: 0o644 });
   const c = r(cc, ["-O2", "-o", tmp, src, ...(platform === "darwin" ? [] : ["-lutil"])]);
-  if (c.status !== 0) { rmSync(tmp, { force: true }); return { path: null, note: `couldn't build the terminal helper (${c.out.trim().split("\n").slice(-1)[0] || "compiler failed"})` }; }
+  if (c.status !== 0) {
+    rmSync(tmp, { force: true });
+    const lines = c.out.trim().split("\n"); const why = lines.find((l) => /\berror\b/i.test(l)) ?? lines.at(-1);
+    return { path: null, note: `couldn't build the terminal helper (${why?.replace(src, "hearth-pty.c").trim() || "compiler failed"})` };
+  }
   if (platform === "darwin") r("/usr/bin/codesign", ["--force", "--sign", "-", "--identifier", "io.github.hearth.pty", tmp]); // the linker signs too; best effort
   chmodSync(tmp, 0o755); renameSync(tmp, bin); writeFileSync(stamp, want + "\n", { mode: 0o644 });
   return { path: bin, built: true };
