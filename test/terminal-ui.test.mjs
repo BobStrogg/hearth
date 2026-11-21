@@ -76,3 +76,12 @@ for (const [name, vp] of [["desktop", { width: 1100, height: 760 }], ["phone", {
     await page.close();
   });
 }
+
+test("#/terminals opens the home screen at the Terminals section; the toolbar has a Terminals button", async (t) => {
+  if (skip) return t.skip(skip);
+  const page = await browser.newPage(); await page.setViewport({ width: 390, height: 500, isMobile: true, hasTouch: true });
+  await page.goto(base + "/#/terminals"); await page.waitForSelector("section.terms");
+  assert.ok(await page.$$eval(".toolbar button", (bs) => bs.some((b) => /Terminals/.test(b.textContent))), "Terminals button");
+  await until(() => page.$eval("section.terms", (e) => { const r = e.getBoundingClientRect(); return r.top >= -1 && r.top < innerHeight; }));
+  await page.close();
+});

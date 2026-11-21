@@ -88,10 +88,17 @@ async function showList() {
   $("#view").replaceChildren(
     h("div", { class: "toolbar" }, h("span", { class: "muted" }, me.user), h("div", { class: "row" },
       me.files ? h("button", { onclick: () => { location.hash = "#/files"; }, title: "Browse, download and upload files on this computer" }, ico("folder"), " Files") : null,
+      terms ? h("button", { onclick: showTerminals, title: "Shells kept open on this computer (+ New terminal)" }, "⌨ Terminals") : null,
       me.push ? h("button", { onclick: notifySheet, title: "Notifications on this device", "aria-label": "Notifications" }, ico("bell")) : null,
       h("button", { onclick: importSessions }, "Import existing"), h("button", { class: "primary", onclick: newSession }, "+ New session"))),
     items.length ? h("ul", { class: "list" }, items) : h("p", { class: "muted center" }, "No sessions yet."),
     terms ? terminalsSection(terms) : null, versionBar());
+  if (location.hash === "#/terminals") showTerminals();
+}
+// #/terminals (e.g. a "Terminals" link from elsewhere) opens the home screen at its Terminals section
+function showTerminals() {
+  if (location.hash !== "#/terminals") { location.hash = "#/terminals"; return; }
+  $("#view section.terms")?.scrollIntoView({ block: "start" });
 }
 
 // ---------- version / update ----------

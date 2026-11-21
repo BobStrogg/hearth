@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+- A *Terminals* button at the top of the home screen jumps to the terminal list, and `#/terminals` opens the home
+  screen there (so a link from elsewhere, like a home dashboard, lands on the list instead of below every session).
 
 ## 0.9.1
 - Release build only: the macOS arm64 binary is built on the `macos-15` runner (GitHub retired `macos-14`, so the
