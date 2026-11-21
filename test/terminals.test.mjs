@@ -96,7 +96,7 @@ describe("terminal registry", { skip }, () => {
     process.kill(job, 0); // alive
     const info = await T.close("alice", t.id);
     assert.equal(info.state, "exited");
-    await sleep(900); // grace (400 ms) + pkill
+    await sleep(100); // close() resolved once the session was empty (the job was SIGKILLed after the 400 ms grace)
     assert.throws(() => process.kill(job, 0), /ESRCH/, "the HUP-ignoring job was killed");
     assert.ok(T.list("alice").some((x) => x.id === t.id), "a closed terminal stays listed (ended) until removed");
     await T.close("alice", t.id, { remove: true });

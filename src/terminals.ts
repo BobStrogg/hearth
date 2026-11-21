@@ -82,6 +82,7 @@ export class Term {
     });
     this.proc.on("error", (e) => { this.output(Buffer.from(`\r\nhearth: can't start the terminal: ${e.message}\r\n`)); });
     this.proc.on("close", (code, sig) => {
+      clearTimeout(this.killTimer);
       if (this.exitCode === null && this.signal === null) { if (sig) this.signal = sig; else if (code !== 0) this.exitCode = code; }
       this.state = "exited"; this.exitedAt = Date.now(); this.running = null;
       this.broadcast(JSON.stringify({ type: "exit", terminal: this.info() }));
@@ -145,28 +146,22 @@ export class Term {
     (this.proc.stdio[3] as import("node:net").Socket).write(`R ${cols} ${rows}\n`);
   }
   /**
-   * Close: hang up like closing a terminal window (the shell and the foreground job get SIGHUP), then after the grace
-   * period SIGKILL anything still in the terminal's session, including jobs that ignore SIGHUP and the shell itself.
-   * Resolves when the shell has ended (the clean-up of leftovers may follow, within the grace period).
+   * Close: hang up like closing a terminal window (the shell and the foreground job get SIGHUP); the helper SIGKILLs
+   * anything still in the terminal's session after the grace period. Resolves when all of it has ended.
    */
   close(): Promise<void> {
     if (!this.killTimer && this.state === "running") {
-      try { (this.proc.stdio[3] as import("node:net").Socket).write("H\n"); } catch { /* gone */ }
-      try { this.proc.kill("SIGHUP"); } catch { /* gone */ }
-      this.killTimer = setTimeout(() => this.forceKill(), this.graceMs);
+      try { (this.proc.stdio[3] as import("node:net").Socket).write(`H ${this.graceMs}\n`); } catch { /* gone */ }
+      this.killTimer = setTimeout(() => this.forceKill(), this.graceMs + 3000); // the helper itself is stuck
       this.killTimer.unref();
     }
     return this.done;
   }
-  /** SIGKILL everything in the terminal's session now. */
+  /** Last resort when the helper doesn't finish: SIGKILL the shell's process group and the helper. */
   forceKill() {
-    if (this.pid > 0) {
-      // The shell is the session leader (sid = its pid); jobs it started have their own process groups in that session.
-      // A session id stays reserved while anything is in the session, so this can't hit an unrelated process.
-      try { process.kill(-this.pid, "SIGKILL"); } catch { /* group gone */ }
-      try { execFile("pkill", ["-KILL", "-s", String(this.pid), "."], { timeout: 5000 }, () => {}); } catch { /* no pkill */ }
-    }
-    if (this.state === "running") setTimeout(() => { if (this.state === "running") { try { this.proc.kill("SIGKILL"); } catch { /* gone */ } } }, 500).unref();
+    if (this.state !== "running") return;
+    if (this.pid > 0) { try { process.kill(-this.pid, "SIGKILL"); } catch { /* group gone */ } }
+    try { this.proc.kill("SIGKILL"); } catch { /* gone */ }
   }
 }
 
@@ -264,9 +259,7 @@ export class Terminals {
   }
   async shutdown() {
     clearInterval(this.sweepTimer);
-    // Hearth is stopping: nothing it started should outlive it, so leftovers don't wait for the grace period.
     await Promise.all([...this.terms.values()].map((t) => t.close().catch(() => {})));
-    for (const t of this.terms.values()) t.forceKill();
     this.terms.clear();
   }
 }

@@ -5,7 +5,8 @@
   activity, how many devices are viewing) with *+ New terminal* and a close button. A terminal is a login shell on a
   real pseudo-terminal owned by the daemon, so closing the page, a dropped connection or switching devices only
   detaches; reopening it replays the last 512 KB of output and redraws full-screen programs. Close hangs it up
-  (SIGHUP, like closing a terminal window) and SIGKILLs whatever is still in its session 3 s later. Phone key row: Esc,
+  (SIGHUP, like closing a terminal window) and SIGKILLs whatever is still in its session 3 s later (found with
+  getsid(), so jobs that ignore SIGHUP go too). Phone key row: Esc,
   Tab, sticky Ctrl, arrows, ^C, ^D. Limits: `HEARTH_TERMINALS_MAX` (10 running per user), idle close after
   `HEARTH_TERMINAL_IDLE_HOURS` (72 h with no input, output or viewer); ended terminals stay listed for an hour.
   `HEARTH_TERMINALS=off` disables them. They end when Hearth restarts or updates. The pty helper (`hearth-pty`) is
