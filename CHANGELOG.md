@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.9.1
+- Release build only: the macOS arm64 binary is built on the `macos-15` runner (GitHub retired `macos-14`, so the
+  v0.9.0 release build stopped before publishing). No code changes; 0.9.1 is the first published release with the
+  0.9.0 changes below.
+
 ## 0.9.0
 - Terminals that stay open on the computer. The home screen lists them (folder, what's in the foreground, last
   activity, how many devices are viewing) with *+ New terminal* and a close button. A terminal is a login shell on a
