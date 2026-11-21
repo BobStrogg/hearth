@@ -146,7 +146,10 @@ export function ensurePtyHelper(o: { home?: string; platform?: NodeJS.Platform; 
   mkdirSync(join(bin, ".."), { recursive: true, mode: 0o700 });
   const src = `${bin}.c`, tmp = `${bin}.new`;
   writeFileSync(src, PTY_C, { mode: 0o644 });
-  const c = r(cc, ["-O2", "-o", tmp, src, ...(platform === "darwin" ? [] : ["-lutil"])]);
+  // A clang inside Xcode.app (rather than the Command Line Tools) has no default SDK when run directly: point it at one.
+  let sdk: string[] = [];
+  if (platform === "darwin") { const k = r("/usr/bin/xcrun", ["--show-sdk-path"]); const p = k.status === 0 ? k.out.trim().split("\n")[0] : ""; if (p && existsSync(p)) sdk = ["-isysroot", p]; }
+  const c = r(cc, ["-O2", ...sdk, "-o", tmp, src, ...(platform === "darwin" ? [] : ["-lutil"])]);
   if (c.status !== 0) {
     rmSync(tmp, { force: true });
     const lines = c.out.trim().split("\n"); const why = lines.find((l) => /\berror\b/i.test(l)) ?? lines.at(-1);
