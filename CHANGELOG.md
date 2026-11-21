@@ -1,6 +1,10 @@
 # Changelog
 
 ## Unreleased
+- Terminals on phones and tablets: a one-finger drag now scrolls the terminal (its scrollback in a shell; wheel or
+  arrow keys for a full-screen program such as a CLI agent, as a mouse wheel would). xterm.js has no touch scrolling of
+  its own, so the drag used to move the page instead: on iOS it dragged the view and resized Safari's toolbar, and full-
+  screen programs repainted everything when the finger lifted. A tap still focuses the terminal.
 
 ## 0.9.2
 - Terminals: the phone keyboard sliding in or out, or a rotation, now sends the computer one resize when the layout

@@ -131,8 +131,8 @@ h2.sect { font-size:.95rem; margin:0; color:var(--muted); font-weight:600; }
 .iconbtn { min-height:36px; min-width:36px; padding:0; display:inline-flex; align-items:center; justify-content:center; border-radius:99px; background:none; }
 @media (pointer:coarse) { .iconbtn { min-height:44px; min-width:44px; } }
 .iconbtn .ico { width:16px; height:16px; }
-.term-wrap { flex:1; min-height:0; display:flex; flex-direction:column; background:#14161a; }
-.term-host { flex:1; min-height:0; padding:4px 0 0 6px; overflow:hidden; }
+.term-wrap { flex:1; min-height:0; display:flex; flex-direction:column; background:#14161a; overscroll-behavior:none; }
+.term-host { flex:1; min-height:0; padding:4px 0 0 6px; overflow:hidden; touch-action:none; overscroll-behavior:none; }
 .term-host .xterm { height:100%; }
 .term-banner { display:flex; flex-wrap:wrap; align-items:center; gap:.5rem; padding:.5rem .8rem; background:var(--card); border-bottom:1px solid var(--line); color:var(--fg); font-size:.9rem; }
 .term-banner[hidden] { display:none; }
