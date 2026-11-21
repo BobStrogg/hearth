@@ -23,11 +23,17 @@ before(async () => {
     ...["configId", "split", "late", "wrapped"].map((shape) => ({ id: `mockcfg-${shape}`, name: `Mock config (${shape})`, detect: [process.execPath], command: process.execPath, args: [MOCK], env: { MOCK_CONFIG: "1", MOCK_SHAPE: shape } })),
     { id: "devinfail", name: "Devin-like (load fails after attaching)", detect: [process.execPath], command: process.execPath, args: [MOCK], env: { MOCK_LOAD_SESSION: "1", MOCK_LIST: "1", MOCK_RESUME: "1", MOCK_LOAD_FAIL: "1", MOCK_STORE: join(dataDir, "store.json") } },
     { id: "devinlate", name: "Devin-like (late replay)", detect: [process.execPath], command: process.execPath, args: [MOCK], env: { MOCK_LOAD_SESSION: "1", MOCK_LIST: "1", MOCK_RESUME: "1", MOCK_LATE_REPLAY: "1", MOCK_STORE: join(dataDir, "store.json") } },
+    { id: "mocksync", name: "Mock (history on disk)", detect: [process.execPath], command: process.execPath, args: [MOCK], env: { MOCK_LOAD_SESSION: "1", MOCK_LIST: "1", MOCK_RESUME: "1", MOCK_PERSIST: "1", MOCK_STORE: join(dataDir, "sync-store.json") } },
+    { id: "mocksynclate", name: "Mock (history on disk, late replay)", detect: [process.execPath], command: process.execPath, args: [MOCK], env: { MOCK_LOAD_SESSION: "1", MOCK_LIST: "1", MOCK_RESUME: "1", MOCK_PERSIST: "1", MOCK_LATE_REPLAY: "1", MOCK_STORE: join(dataDir, "sync-store.json") } },
     { id: "mockload", name: "Mock+load", detect: [process.execPath], command: process.execPath, args: [MOCK], env: { MOCK_LOAD_SESSION: "1" } },
   ]));
   writeFileSync(join(dataDir, "store.json"), JSON.stringify({
     "cli-1": { cwd: join(root, "proj"), title: "Fix the parser", updatedAt: "2026-10-18T10:00:00Z", history: [{ role: "user", text: "fix the parser" }, { role: "agent", text: "Parser fixed." }] },
     "cli-2": { cwd: "/etc", title: "Outside roots", updatedAt: "2026-10-18T11:00:00Z", history: [] },
+  }));
+  writeFileSync(join(dataDir, "sync-store.json"), JSON.stringify({
+    "eink": { cwd: join(root, "proj"), title: "Battery Powered E-Ink Touch Hardware Design", updatedAt: "2026-11-20T10:00:00Z", history: [{ role: "user", text: "design an e-ink board" }, { role: "agent", text: "Here is a board." }] },
+    "late": { cwd: join(root, "proj"), title: "Late replay", updatedAt: "2026-11-20T09:00:00Z", history: [{ role: "user", text: "first question" }, { role: "agent", text: "First answer." }] },
   }));
   const cfg = configFromEnv({ HEARTH_PORT: "0", HEARTH_DATA_DIR: dataDir, HEARTH_ROOTS: root, HEARTH_AGENTS_FILE: agentsFile,
     HEARTH_IDENTITY: "header:x-user", HEARTH_PASSWORD: hashPassword(PW) });
@@ -349,6 +355,68 @@ test("import + resume (Devin-like): no duplicated live stream or history", async
     if (agentId === "devinlate") assert.equal(words(t, "Parser fixed."), 1, `${agentId}: history once: ${t}`);
     s.close(); await api(U, "DELETE", `/api/sessions/${imp.json.id}?purge=1`);
   }
+});
+
+// Regression: a session imported, deleted (with or without its history) and imported again; and turns added to the
+// agent's own session outside Hearth (resumed in its CLI) showing up in Hearth on reload, re-import, or Open.
+test("re-import after delete, and history added outside Hearth is synced in", async () => {
+  const U = "eink@example.com"; await api(U, "POST", "/api/unlock", { password: PW });
+  const storeFile = join(dataDir, "sync-store.json");
+  const external = (id, q, a) => { const st = JSON.parse(readFileSync(storeFile, "utf8")); st[id].history.push({ role: "user", text: q }, { role: "agent", text: a }); writeFileSync(storeFile, JSON.stringify(st)); };
+  const count = (meta, t) => text(h.store.read(meta)).split(t).length - 1;
+  const listed = async () => (await api(U, "GET", "/api/agents/mocksync/sessions")).json.sessions.find((x) => x.sessionId === "eink");
+  const imp = () => api(U, "POST", "/api/sessions/import", { agentId: "mocksync", agentSessionId: "eink", cwd: join(root, "proj"), title: "Battery Powered E-Ink Touch Hardware Design" });
+
+  // import, delete with history, import again: a fresh, working session
+  const a = await imp(); assert.equal(a.status, 201, JSON.stringify(a.json));
+  assert.equal((await listed()).hearthId, a.json.id);
+  assert.equal((await api(U, "DELETE", `/api/sessions/${a.json.id}?purge=1`)).status, 200);
+  assert.equal((await listed()).hearthId, null);
+  const b = await imp(); assert.equal(b.status, 201, JSON.stringify(b.json)); assert.notEqual(b.json.id, a.json.id);
+  // terminate (history kept, session closed): the picker offers Import again, not an "Open" of a session that can't start
+  assert.equal((await api(U, "DELETE", `/api/sessions/${b.json.id}`)).status, 200);
+  assert.equal((await listed()).hearthId, null);
+  const c = await imp(); assert.equal(c.status, 201, JSON.stringify(c.json)); assert.notEqual(c.json.id, b.json.id);
+  assert.equal((await listed()).hearthId, c.json.id);
+  const live = h.live.get(c.json.id);
+  assert.equal(count(live.meta, "Here is a board."), 1);
+
+  // a turn in Hearth, then one in the agent's CLI while Hearth's agent is stopped: the reload appends just the new turn
+  const s = await ws(U, c.json.id); await s.until((m) => m.type === "state" && m.state === "idle");
+  s.send(JSON.stringify({ type: "prompt", text: "hi from hearth" })); await s.until((m) => m.type === "prompt_done");
+  live.child.kill("SIGKILL"); await s.until((m) => m.type === "state" && m.state === "stopped");
+  external("eink", "add a touch layer", "Touch layer added.");
+  assert.equal((await api(U, "POST", `/api/sessions/${c.json.id}/resume`)).status, 200);
+  await new Promise((r) => setTimeout(r, 800)); // replay goes quiet, then it is compared
+  assert.equal(count(live.meta, "Touch layer added."), 1, text(h.store.read(live.meta)));
+  assert.equal(count(live.meta, "Here is a board."), 1); assert.equal(count(live.meta, "Hello **world**!"), 1);
+  const ev = h.store.read(live.meta).filter((e) => e.dir === "sys").map((e) => e.msg.event);
+  assert.ok(ev.includes("external_history_synced"), String(ev));
+  // the next prompt continues after it, and a plain restart adds nothing twice
+  s.send(JSON.stringify({ type: "prompt", text: "again" })); await s.until((m) => m.type === "prompt_done" && s.msgs.filter((x) => x.type === "prompt_done").length === 2);
+  live.child.kill("SIGKILL"); await s.until((m) => m.type === "state" && m.state === "stopped" && s.msgs.filter((x) => x.type === "prompt_done").length === 2);
+  await api(U, "POST", `/api/sessions/${c.json.id}/resume`); await new Promise((r) => setTimeout(r, 800));
+  assert.equal(count(live.meta, "Touch layer added."), 1); assert.equal(count(live.meta, "Hello **world**!"), 2);
+
+  // while Hearth's agent is still running idle: importing again (the picker's "Open") reloads and syncs it
+  external("eink", "battery life?", "About a month.");
+  const again = await imp(); assert.equal(again.status, 200); assert.equal(again.json.id, c.json.id);
+  await new Promise((r) => setTimeout(r, 800));
+  assert.equal(count(live.meta, "About a month."), 1, text(h.store.read(live.meta)));
+  assert.equal(count(live.meta, "Touch layer added."), 1);
+  s.close(); await api(U, "DELETE", `/api/sessions/${c.json.id}?purge=1`);
+
+  // an agent that replays after answering session/load (Devin-like) syncs the same way
+  const L = await api(U, "POST", "/api/sessions/import", { agentId: "mocksynclate", agentSessionId: "late", cwd: join(root, "proj") });
+  assert.equal(L.status, 201, JSON.stringify(L.json));
+  const ll = h.live.get(L.json.id); await new Promise((r) => setTimeout(r, 300));
+  assert.equal(count(ll.meta, "First answer."), 1);
+  external("late", "second question", "Second answer.");
+  await api(U, "POST", "/api/sessions/import", { agentId: "mocksynclate", agentSessionId: "late", cwd: join(root, "proj") });
+  await new Promise((r) => setTimeout(r, 800));
+  assert.equal(count(ll.meta, "Second answer."), 1, text(h.store.read(ll.meta)));
+  assert.equal(count(ll.meta, "First answer."), 1);
+  await api(U, "DELETE", `/api/sessions/${L.json.id}?purge=1`);
 });
 
 test("history paging over WebSocket: tail on open, cursor pages, live entries meanwhile, reconnect unaffected", async () => {

@@ -11,6 +11,7 @@ import { VERSION } from "./version.js";
 import { PromptQueue, QueueError, type QueueView } from "./queue.js";
 import type { AgentPids } from "./orphans.js";
 import { noteBlocked, noteOpen, responsibleProgram } from "./privacy.js";
+import { newTurns, type ReplayTurn } from "./history-sync.js";
 
 export type LiveEvent =
   | { type: "entry"; entry: TranscriptEntry }
@@ -433,7 +434,10 @@ export class LiveSession {
         // Track settings from the raw message: the SDK's parsed notification can drop unrecognised option shapes.
         const mm = msg as { method?: string; params?: { update?: Record<string, unknown> } };
         if (mm.method === "session/update" && mm.params?.update) { const next = applyUpdate(self.meta.settings ?? {}, mm.params.update); if (next) self.updateSettings(next); }
-        if (!(mm.method === "session/update" && (self.loading || (self.dropIdleReplay && !self.prompting && REPLAY_KINDS.has(String(mm.params?.update?.sessionUpdate)))))) self.log("in", msg);
+        const replayed = mm.method === "session/update" && (self.loading || (self.dropIdleReplay && !self.prompting && REPLAY_KINDS.has(String(mm.params?.update?.sessionUpdate))));
+        if (!replayed) self.log("in", msg);
+        // A reload's replay is kept aside and compared with the transcript: turns added outside Hearth are appended.
+        else if (self.syncBuf && REPLAY_KINDS.has(String(mm.params?.update?.sessionUpdate))) { self.syncBuf.push(msg); self.armSync(); }
         ctl.enqueue(msg); },
     }));
     const w = raw.writable.getWriter();
@@ -451,17 +455,21 @@ export class LiveSession {
     const canResume = !!caps.sessionCapabilities?.resume;
     const seeding = this.meta.seeded === false; // imported: replay the agent's history into our transcript once
     let done = false;
+    const failures: string[] = [];
     if (prior && caps.loadSession && !skipLoad) {
       this.loading = !seeding;
+      this.syncBuf = seeding ? null : [];
       try {
         if (seeding) this.log("sys", { event: "import_replay_start", agentSessionId: prior });
         const lr = await step(this.conn.loadSession({ sessionId: prior, cwd: this.meta.cwd, mcpServers: [] }), "session/load");
         this.updateSettings(absorb(this.meta.settings ?? {}, lr as never));
         this.log("sys", { event: seeding ? "session_imported" : "session_loaded", agentSessionId: prior, via: "load" });
         // Some agents keep replaying history after answering session/load; it's already in our transcript.
-        if (!seeding) this.dropIdleReplay = true;
+        if (!seeding) { this.dropIdleReplay = true; this.armSync(); }
         done = true;
       } catch (e) {
+        this.syncBuf = null; // a failed load's partial replay can't be compared safely
+        failures.push(`session/load: ${String((e as Error)?.message ?? e)}`);
         this.log("sys", { event: "session_load_failed", error: String((e as Error)?.message ?? e) });
         if (e instanceof StartTimeout) {
           // A load that hangs leaves the agent wedged: start a fresh process that doesn't try to load.
@@ -486,11 +494,13 @@ export class LiveSession {
           note: seeding ? "agent resumed the session but doesn't replay history over ACP; earlier messages aren't shown" : undefined });
         done = true;
       } catch (e) {
+        failures.push(`session/resume: ${String((e as Error)?.message ?? e)}`);
         this.log("sys", { event: "session_resume_failed", error: String((e as Error)?.message ?? e) });
       }
     }
     if (!done) {
-      if (seeding) throw new Error("this agent couldn't load or resume that session");
+      // Say what the agent answered: a failed import leaves no session (and so no transcript) behind to look at.
+      if (seeding) throw new Error(`this agent couldn't load or resume that session${failures.length ? ` (${failures.join("; ")})` : ""}`);
       if (prior) this.log("sys", { event: "context_reset", reason: "agent could not load or resume the session; earlier history is display-only" });
       await this.newAgentSession(step);
     }
@@ -502,6 +512,46 @@ export class LiveSession {
 
   private recycling = false;
   private dropIdleReplay = false;
+
+  /** History replayed by a reload (session/load of a session Hearth already has), compared once it goes quiet. */
+  private syncBuf: unknown[] | null = null;
+  private syncTimer?: NodeJS.Timeout;
+  /** How long a reload's replay has to stay quiet before it is compared (some agents replay after answering). */
+  static SYNC_QUIET_MS = 400;
+  private armSync() {
+    if (!this.syncBuf) return;
+    if (this.syncTimer) clearTimeout(this.syncTimer);
+    this.syncTimer = setTimeout(() => { this.syncTimer = undefined; this.flushSync(); }, LiveSession.SYNC_QUIET_MS);
+    this.syncTimer.unref?.();
+  }
+  /** Append the turns the agent has that this transcript doesn't (added outside Hearth, e.g. in the agent's CLI). */
+  flushSync() {
+    if (this.loading) { this.armSync(); return; }
+    if (this.syncTimer) { clearTimeout(this.syncTimer); this.syncTimer = undefined; }
+    const buf = this.syncBuf; this.syncBuf = null;
+    if (!buf?.length || this.meta.state === "exited") return;
+    let add: ReplayTurn[] = [];
+    try { add = newTurns(buf, this.store.read(this.meta)); } catch { return; /* purged */ }
+    if (!add.length) return;
+    this.log("sys", { event: "external_history_start", turns: add.length, agentSessionId: this.meta.agentSessionId });
+    for (const t of add) for (const m of t.msgs) this.log("in", m);
+    this.log("sys", { event: "external_history_synced", turns: add.length, agentSessionId: this.meta.agentSessionId });
+  }
+
+  /**
+   * Pick up history added to the agent's session outside Hearth: reload the session now (restart an idle agent, or
+   * start a stopped one). Does nothing while a turn is running or queued.
+   */
+  async resync(): Promise<void> {
+    if (this.meta.state === "exited" || this.turnActive || this.prompting || this.starting) return this.starting;
+    const c = this.child;
+    if (c && c.exitCode === null) {
+      this.recycling = true; this.cleanupKills.add(c);
+      try { await this.killChild(c); } finally { this.recycling = false; }
+      this.child = undefined; this.conn = undefined;
+    }
+    await this.ensureRunning();
+  }
   private async killChild(c: ChildProcess) {
     if (c.exitCode !== null) return;
     this.intendedKills.add(c);
@@ -522,6 +572,7 @@ export class LiveSession {
   async prompt(content: acp.ContentBlock[]) {
     await this.ensureRunning();
     if (this.prompting) throw new Error("agent is busy; cancel first");
+    this.flushSync(); // history added outside Hearth goes before this turn
     this.prompting = true; this.dropIdleReplay = false; this.phase = "prompt"; this.setState("running");
     try {
       const child = this.child;

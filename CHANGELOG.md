@@ -1,6 +1,20 @@
 # Changelog
 
 ## Unreleased
+- History added to an imported session outside Hearth (for example the session resumed in Devin's or another agent's
+  own CLI) now shows up in Hearth. When Hearth reloads the session (restarting its agent, or importing / opening it
+  again from "Import existing"), the agent's replayed history is compared with Hearth's transcript and only the newer
+  turns are appended (marked `external_history_synced`). Before, the replay was always dropped, so the Hearth copy went
+  stale. Agents that only resume (no history replay over ACP) still can't bring earlier turns across.
+- "Import existing" on a session that is already imported reloads it to pick up those turns, instead of only opening it.
+- Re-importing a session after closing it: a closed (terminated) copy no longer turns the picker's Import into an Open
+  that leads to a session that can't start.
+- Import errors are shown on the session's own row (the sheet's error line was out of sight when the list was
+  scrolled, so a failed import looked like nothing happened), and say what the agent answered to session/load and
+  session/resume.
+- An import that takes longer than 60 s (a long history behind a proxy such as a Cloudflare Tunnel, which gives up
+  after 100 s) answers 202 and finishes in the background; if it fails it stays in the list with the error, and
+  starting it tries the import again.
 
 ## 0.8.1
 - MCP list results (`tools/list`, `prompts/list`, `resources/list`) include `ttlMs: 0` and `cacheScope: "private"`.
