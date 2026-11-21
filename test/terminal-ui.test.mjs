@@ -145,3 +145,45 @@ test("the keyboard opening/closing or a rotation sends the program one resize (o
   await page.evaluate(async (id) => { await fetch(`/api/terminals/${id}?remove=1`, { method: "DELETE", headers: { "x-hearth-csrf": "1" } }); }, id);
   await page.close();
 });
+
+test("touch drag scrolls the terminal (scrollback in a shell, arrow keys for a full-screen program) and never moves the page", async (t) => {
+  if (skip) return t.skip(skip);
+  const page = await browser.newPage(); await page.setViewport({ width: 390, height: 700, isMobile: true, hasTouch: true, deviceScaleFactor: 2 });
+  page.on("dialog", (d) => d.accept());
+  await page.goto(base + "/#/"); await page.waitForSelector("section.terms");
+  await page.$$eval("section.terms button", (bs) => bs.find((b) => /New terminal/.test(b.textContent)).click());
+  await page.waitForSelector(".xterm-rows"); await until(async () => /\$|#/.test(await screen(page)));
+  const id = await page.evaluate(() => termv.id);
+  await page.evaluate(() => { window.__in = []; window.__rs = 0; const o = WebSocket.prototype.send; WebSocket.prototype.send = function (d) { try { const m = JSON.parse(d); if (m.type === "input") window.__in.push(m.data); if (m.type === "resize") window.__rs++; } catch { /* binary */ } return o.call(this, d); }; });
+  await page.click(".term-host"); await page.keyboard.type("seq 1 300\n");
+  await until(() => page.evaluate(() => termv.term.buffer.active.baseY > 100));
+  const cdp = await page.target().createCDPSession();
+  const box = await (await page.$(".term-host")).boundingBox(); const x = box.x + box.width / 2;
+  const drag = async (from, to) => {
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y: from }] });
+    const n = 12; for (let i = 1; i <= n; i++) { await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x, y: from + ((to - from) * i) / n }] }); await sleep(16); }
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] }); await sleep(700);
+  };
+  const st = () => page.evaluate(() => ({ vy: termv.term.buffer.active.viewportY, base: termv.term.buffer.active.baseY, page: scrollY + document.scrollingElement.scrollTop + document.querySelector("#view").scrollTop, top: Math.round(document.querySelector(".term-wrap").getBoundingClientRect().top) }));
+  const s0 = await st();
+  await drag(box.y + 80, box.y + 380); // finger down: earlier output
+  const s1 = await st();
+  assert.ok(s1.vy < s0.vy - 10, `scrolled back: viewport line ${s0.vy} -> ${s1.vy}`);
+  assert.equal(s1.page, s0.page, "the page didn't scroll"); assert.equal(s1.top, s0.top, "the terminal didn't move");
+  await drag(box.y + 380, box.y + 30); await drag(box.y + 380, box.y + 30); // finger up: back to the end
+  assert.ok((await st()).vy > s1.vy, "scrolls forward again");
+  // A tap still focuses (no scrolling, no input sent).
+  const inBefore = await page.evaluate(() => window.__in.length);
+  await page.tap(".term-host"); await sleep(200);
+  assert.equal(await page.evaluate(() => window.__in.length), inBefore, "a tap sends nothing");
+  // Full-screen program (alternate screen, no mouse mode): the drag becomes arrow keys for it.
+  await page.keyboard.type("printf '\\033[?1049h'; read -rsn1 _; printf '\\033[?1049l'\n");
+  await until(() => page.evaluate(() => termv.term.buffer.active.type === "alternate"));
+  await page.evaluate(() => { window.__in = []; });
+  await drag(box.y + 80, box.y + 300);
+  const sent = await page.evaluate(() => window.__in.join(""));
+  assert.match(sent, /\x1b(\[|O)A/, `arrow-up keys for the program: ${JSON.stringify(sent)}`);
+  assert.equal(await page.evaluate(() => window.__rs), 0, "no resize from scrolling");
+  await page.evaluate(async (id) => { await fetch(`/api/terminals/${id}?remove=1`, { method: "DELETE", headers: { "x-hearth-csrf": "1" } }); }, id);
+  await page.close();
+});

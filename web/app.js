@@ -1396,6 +1396,7 @@ class TermView {
       this.send(d);
     });
     this.term.onResize(() => this.queueResize());
+    this.touchScroll();
     this.term.onTitleChange((t) => { if (t && !this.closed) document.title = `${t} · Hearth`; });
     this.ro = new ResizeObserver(() => this.refit()); this.ro.observe(this.host);
     this.refit();
@@ -1403,6 +1404,48 @@ class TermView {
     document.addEventListener("visibilitychange", this.onVis);
     this.connect();
     if (!coarse) this.term.focus();
+  }
+  /**
+   * One-finger drag scrolls the terminal like a mouse wheel would: through the scrollback in a shell, and as wheel or
+   * arrow keys for a full-screen program (alternate screen or mouse mode), which xterm.js decides. xterm.js has no touch
+   * scrolling of its own, so without this the drag moved the page instead: iOS dragged the whole view, collapsed or
+   * expanded Safari's toolbar, and the size change on release made full-screen programs (CLI agents) repaint everything.
+   * A tap (no movement) still focuses the terminal and brings up the keyboard.
+   */
+  touchScroll() {
+    const el = this.term.element; if (!el) return;
+    let last = null, moved = false, acc = 0, lastT = 0, vel = 0, fling = 0;
+    const lineH = () => (this.host.clientHeight / Math.max(1, this.term.rows)) || 17;
+    const wheel = (px) => {
+      acc += px; const step = lineH(); const lines = Math.trunc(acc / step); if (!lines) return;
+      acc -= lines * step;
+      const buf = this.term.buffer.active;
+      if (buf.type === "normal" && this.term.modes.mouseTrackingMode === "none") return this.term.scrollLines(lines); // the scrollback
+      // A full-screen program: a wheel event, which xterm.js turns into wheel reports (mouse mode) or arrow keys
+      // (alternate screen). Its wheel handling reads the legacy wheelDeltaY (120 a notch), which a synthetic event lacks.
+      const ev = new WheelEvent("wheel", { deltaY: lines * step, deltaMode: 0, bubbles: true, cancelable: true });
+      Object.defineProperty(ev, "wheelDeltaY", { value: -lines * 40 }); Object.defineProperty(ev, "wheelDelta", { value: -lines * 40 });
+      (el.querySelector(".xterm-screen") || el).dispatchEvent(ev);
+    };
+    el.addEventListener("touchstart", (e) => {
+      cancelAnimationFrame(fling);
+      if (e.touches.length !== 1) { last = null; return; }
+      last = e.touches[0].clientY; lastT = performance.now(); moved = false; acc = 0; vel = 0;
+    }, { passive: true });
+    el.addEventListener("touchmove", (e) => {
+      if (last === null || e.touches.length !== 1) return;
+      const y = e.touches[0].clientY, dy = last - y, now = performance.now();
+      if (!moved && Math.abs(dy) < 6) return;
+      moved = true; e.preventDefault(); // the page (and Safari's toolbar) stays put
+      vel = dy / Math.max(1, now - lastT); last = y; lastT = now;
+      wheel(dy); // finger down (dy < 0) = earlier output, like a native scroll view
+    }, { passive: false });
+    el.addEventListener("touchend", () => {
+      if (!moved) { last = null; return; }
+      last = null; let v = vel * 16; // gentle momentum, decaying each frame
+      const step = () => { if (Math.abs(v) < 0.5 || this.closed) return; wheel(v); v *= 0.92; fling = requestAnimationFrame(step); };
+      fling = requestAnimationFrame(step);
+    }, { passive: true });
   }
   refit() { if (this.closed || !this.fit || !this.host.clientHeight) return; try { this.fit.fit(); } catch { /* not laid out */ } }
   send(d) { this.sendJson({ type: "input", data: d }); }
