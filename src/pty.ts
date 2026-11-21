@@ -14,7 +14,7 @@ import { dataDir } from "./platform.js";
  *   hearth-pty <cols> <rows> <cwd> <program> [args...]
  *
  * fd 0: keystrokes for the terminal. fd 1: everything the terminal prints. fd 3 (a socket pair): control.
- *   Hearth → helper: "R <cols> <rows>\n" resize (and nudge the foreground program to redraw), "H <graceMs>\n" close.
+ *   Hearth → helper: "R <cols> <rows>\n" resize (the kernel SIGWINCHes the foreground job; the same size again nudges it to redraw), "H <graceMs>\n" close.
  *   helper → Hearth: "P <pid>\n" once started (pid = the program, also its session id), "E <code> <signal>\n" when it ends.
  * Closing ("H", SIGHUP/SIGTERM to the helper, or Hearth going away: fd 0 or fd 3 closing) works like closing a terminal
  * window: the helper closes the pty (the kernel sends SIGHUP to the foreground job) and SIGHUPs the shell. Then, until
@@ -133,8 +133,10 @@ int main(int argc, char **argv) {
           *nl = 0;
           int cc = 0, rr = 0;
           if (ctl[0] == 'R' && sscanf(ctl + 1, "%d %d", &cc, &rr) == 2 && cc > 0 && rr > 0 && cc < 1000 && rr < 1000 && master >= 0) {
+            struct winsize old; int same = ioctl(master, TIOCGWINSZ, &old) == 0 && old.ws_col == cc && old.ws_row == rr;
             ws.ws_col = (unsigned short)cc; ws.ws_row = (unsigned short)rr; ioctl(master, TIOCSWINSZ, &ws);
-            pid_t fg = tcgetpgrp(master); if (fg > 0) kill(-fg, SIGWINCH);
+            /* a new size: the kernel SIGWINCHes the foreground job itself; the same size (a redraw request): nudge it */
+            if (same) { pid_t fg = tcgetpgrp(master); if (fg > 0) kill(-fg, SIGWINCH); }
           } else if (ctl[0] == 'H') { int g = atoi(ctl + 1); if (g > 0 && g < 600000) grace = g; hup = 1; }
           size_t used = (size_t)(nl - ctl) + 1; memmove(ctl, nl + 1, clen - used); clen -= used;
         }
