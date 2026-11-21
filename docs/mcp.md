@@ -94,6 +94,9 @@ the returned `cursor` as `since` until `busy` is false.
 | `cancel_prompt` | Stop the current turn. |
 | `answer_permission` | Choose a `pendingPermissions` `optionId`. Omit it to refuse. |
 | `resume_queue` | Continue a queue that paused after an error. |
+| `list_terminals` | Terminals kept open on the computer (see the web UI): folder, running or ended, what is in the foreground, last activity. |
+| `read_terminal` | Recent output of one terminal as plain text. `maxChars` up to 20000. |
+| `close_terminal` | Close a terminal: SIGHUP to what runs in it, SIGKILL for anything left a few seconds later. |
 
 `awaiting` is `running`, `starting`, `permission`, `queued`, `paused`, `idle`, `stopped`, or `exited`. While it is
 `permission`, the agent is waiting on `answer_permission`.

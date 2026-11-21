@@ -122,3 +122,27 @@ body.voice-out .msg .say { display:inline-flex; }
 .msg .say.on { color:var(--acc); }
 .msg .say .ico { width:16px; height:16px; }
 .sheet-body .err:empty { display:none; }
+hearth-style { display:none !important; } /* xterm.js run-time styles, applied as constructed sheets (see mirrorStyles in app.js) */
+/* Terminals: a section on the home screen, and a full-height xterm.js view with a key row for touch screens. */
+.toolbar.sub { padding-top:.2rem; padding-bottom:.5rem; }
+h2.sect { font-size:.95rem; margin:0; color:var(--muted); font-weight:600; }
+.row.tight { gap:.35rem; flex:none; }
+.term-row strong { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+.iconbtn { min-height:36px; min-width:36px; padding:0; display:inline-flex; align-items:center; justify-content:center; border-radius:99px; background:none; }
+@media (pointer:coarse) { .iconbtn { min-height:44px; min-width:44px; } }
+.iconbtn .ico { width:16px; height:16px; }
+.term-wrap { flex:1; min-height:0; display:flex; flex-direction:column; background:#14161a; }
+.term-host { flex:1; min-height:0; padding:4px 0 0 6px; overflow:hidden; }
+.term-host .xterm { height:100%; }
+.term-banner { display:flex; flex-wrap:wrap; align-items:center; gap:.5rem; padding:.5rem .8rem; background:var(--card); border-bottom:1px solid var(--line); color:var(--fg); font-size:.9rem; }
+.term-banner[hidden] { display:none; }
+.term-banner span { flex:1; min-width:10rem; }
+.term-banner button { min-height:36px; padding:.25rem .8rem; }
+.term-keys { display:none; gap:.3rem; padding:.35rem .4rem calc(.35rem + env(safe-area-inset-bottom)); overflow-x:auto; -webkit-overflow-scrolling:touch; border-top:1px solid var(--line); background:var(--bg); flex:none; scrollbar-width:none; }
+.term-keys::-webkit-scrollbar { display:none; }
+body.kb .term-keys { padding-bottom:.35rem; }
+@media (pointer:coarse) { .term-keys { display:flex; } } html.tesla .term-keys { display:flex; }
+.term-keys button { flex:none; min-height:40px; min-width:44px; padding:0 .6rem; border-radius:8px; font:600 .85rem ui-monospace, Menlo, monospace; color:var(--fg); }
+.term-keys button.on { color:#1b1d21; background:var(--acc); border-color:var(--acc); }
+.term-host .xterm .xterm-viewport { background-color:#14161a; }
+.pill.open { color:var(--ok); border-color:var(--ok); }

@@ -17,6 +17,7 @@ import { statSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { resolve } from "node:path";
 import { osUser, type AgentDef } from "./agents.js";
+import type { Terminals } from "./terminals.js";
 import { canonicalUser } from "./auth.js";
 import { QueueError } from "./queue.js";
 import { within, type LiveSession } from "./session.js";
@@ -54,6 +55,7 @@ export interface McpHost {
   agentById(id: unknown): AgentDef | undefined;
   listAgentCatalog(): Promise<Record<string, unknown>[]>;
   openSession(m: SessionMeta): LiveSession;
+  terminals?: Terminals | null;
 }
 
 /** Why /mcp is off, or null when the token is usable. */
@@ -213,6 +215,9 @@ export const MCP_TOOLS: ToolDef[] = [
   { name: "poll_events", description: "Messages and status newer than since (a cursor from send_prompt, get_session, or a previous poll). Read events, then call again with the returned cursor while hasMore or busy is true.", inputSchema: { type: "object", properties: { sessionId: str("Hearth session id."), since: num("Return transcript events with seq greater than this. 0 reads from the start.") }, required: ["sessionId"] }, annotations: { readOnlyHint: true, openWorldHint: false } },
   { name: "cancel_prompt", description: "Ask the agent to stop the turn it is running. Returns immediately; poll_events reports the cancelled stop reason.", inputSchema: { type: "object", properties: { sessionId: str("Hearth session id.") }, required: ["sessionId"] }, annotations: { destructiveHint: true } },
   { name: "answer_permission", description: "Answer a permission the agent is waiting on (see pendingPermissions on the session). Pass optionId from that list. Omit optionId to refuse.", inputSchema: { type: "object", properties: { sessionId: str("Hearth session id."), permissionId: str("Id from pendingPermissions."), optionId: str("optionId to select. Omit to refuse.") }, required: ["sessionId", "permissionId"] } },
+  { name: "list_terminals", description: "List this MCP user's Hearth terminals: shells kept open on the computer between visits to the web UI. Shows each one's folder, whether it is still running, what is in the foreground (for example a CLI agent holding a session), and its last activity.", inputSchema: { type: "object", properties: {} }, annotations: { readOnlyHint: true, openWorldHint: false } },
+  { name: "read_terminal", description: "The recent output of one terminal as plain text (escape codes removed), newest last.", inputSchema: { type: "object", properties: { terminalId: str("Id from list_terminals."), maxChars: num("How much of the end to return, up to 20000 (default 4000).") }, required: ["terminalId"] }, annotations: { readOnlyHint: true, openWorldHint: false } },
+  { name: "close_terminal", description: "Close a terminal like closing its window: everything running in it gets SIGHUP, and anything still there a few seconds later is killed. An already-ended terminal is just removed from the list.", inputSchema: { type: "object", properties: { terminalId: str("Id from list_terminals.") }, required: ["terminalId"] }, annotations: { destructiveHint: true } },
   { name: "resume_queue", description: "Continue a session whose prompt queue paused after an error.", inputSchema: { type: "object", properties: { sessionId: str("Hearth session id.") }, required: ["sessionId"] } },
 ];
 
@@ -362,6 +367,18 @@ async function callTool(h: McpHost, name: string, args: Record<string, unknown>)
     const optionId = typeof args.optionId === "string" && args.optionId ? args.optionId : null;
     if (!l.answerPermission(id, optionId)) throw new ToolFail("That permission is no longer waiting. poll_events to see the current ones.");
     return { ok: true, session: sessionStatus(h, l.meta, true) };
+  }
+  if (name === "list_terminals" || name === "read_terminal" || name === "close_terminal") {
+    const T = h.terminals;
+    if (!T) throw new ToolFail("Terminals are off on this computer (HEARTH_TERMINALS=off).");
+    if (name === "list_terminals") return { terminals: await T.listDetailed(owner) };
+    const t = T.get(owner, args.terminalId);
+    if (!t) throw new ToolFail("No such terminal. Call list_terminals.");
+    if (name === "read_terminal") {
+      const max = typeof args.maxChars === "number" && Number.isInteger(args.maxChars) && args.maxChars > 0 ? Math.min(args.maxChars, 20_000) : 4000;
+      return { terminal: t.info(), output: t.text(max) };
+    }
+    return { ok: true, terminal: await T.close(owner, t.id) };
   }
   if (name === "resume_queue") {
     const m = findSession(h, owner, args.sessionId);

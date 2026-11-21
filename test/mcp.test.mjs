@@ -299,3 +299,19 @@ test("poll reads the reply, permissions can be answered, rename and close work",
   const ended = data(await rpc("tools/call", { name: "list_sessions", arguments: { includeEnded: true } }));
   assert.equal(ended.sessions.some((s) => s.id === id && s.state === "exited"), true);
 });
+
+test("terminals over MCP: list, read and close", { skip: process.platform === "win32" && "no terminals on Windows" }, async (ctx) => {
+  const st = h.terminals.status(); if (st.available === false) return ctx.skip(st.note);
+  h.terminals.o.shell = () => ({ command: "/bin/sh", args: ["-i"] }); h.terminals.o.graceMs = 300;
+  const t = h.terminals.create("mcp@example.com", { cwd: proj, title: "Devin CLI" });
+  t.input("echo mcp-sees-$((20+1))\n");
+  for (let i = 0; i < 200 && !t.text().includes("mcp-sees-21"); i++) await new Promise((r) => setTimeout(r, 20));
+  const listed = data(await rpc("tools/call", { name: "list_terminals" }));
+  assert.ok(listed.terminals.some((x) => x.id === t.id && x.title === "Devin CLI" && x.state === "running"));
+  const read = data(await rpc("tools/call", { name: "read_terminal", arguments: { terminalId: t.id } }));
+  assert.match(read.output, /mcp-sees-21/);
+  assert.doesNotMatch(read.output, /\x1b/);
+  assert.equal((await rpc("tools/call", { name: "read_terminal", arguments: { terminalId: "0".repeat(16) } })).json.result.isError, true);
+  const closed = data(await rpc("tools/call", { name: "close_terminal", arguments: { terminalId: t.id } }));
+  assert.equal(closed.terminal.state, "exited");
+});

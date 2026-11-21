@@ -62,7 +62,7 @@ $("#back").onclick = () => { location.hash = "#/"; };
 
 // ---------- lock ----------
 function showLock() {
-  if (chat) { chat.close(); chat = null; }
+  leaveViews();
   setHeader("Unlock");
   const input = h("input", { type: "password", autocomplete: "current-password", placeholder: "Password", "aria-label": "Password" });
   const err = h("p", { class: "err" });
@@ -74,12 +74,12 @@ function showLock() {
 
 // ---------- session list ----------
 async function showList() {
-  if (chat) { chat.close(); chat = null; }
+  leaveViews();
   setHeader("Hearth");
   const me = await api("GET", "/api/me");
   if (me.needsPassword && !me.unlocked) return showLock();
   Voice.enabled = !!me.voice;
-  const [list, ag] = await Promise.all([api("GET", "/api/sessions"), api("GET", "/api/agents")]);
+  const [list, ag, terms] = await Promise.all([api("GET", "/api/sessions"), api("GET", "/api/agents"), me.terminals ? api("GET", "/api/terminals").catch(() => []) : null]);
   agents = ag;
   const name = (id) => agents.find((a) => a.id === id)?.name ?? id;
   const items = list.map((s) => h("li", { class: "card session", onclick: () => { location.hash = `#/s/${s.id}`; } },
@@ -90,7 +90,8 @@ async function showList() {
       me.files ? h("button", { onclick: () => { location.hash = "#/files"; }, title: "Browse, download and upload files on this computer" }, ico("folder"), " Files") : null,
       me.push ? h("button", { onclick: notifySheet, title: "Notifications on this device", "aria-label": "Notifications" }, ico("bell")) : null,
       h("button", { onclick: importSessions }, "Import existing"), h("button", { class: "primary", onclick: newSession }, "+ New session"))),
-    items.length ? h("ul", { class: "list" }, items) : h("p", { class: "muted center" }, "No sessions yet."), versionBar());
+    items.length ? h("ul", { class: "list" }, items) : h("p", { class: "muted center" }, "No sessions yet."),
+    terms ? terminalsSection(terms) : null, versionBar());
 }
 
 // ---------- version / update ----------
@@ -1069,6 +1070,7 @@ function diffView(a, b) {
 
 // ---------- session menu ----------
 $("#menu").onclick = () => {
+  if (termv) return terminalMenu();
   if (!chat) return; chat.settingsOpen = false;
   const sheet = $("#sheet"); sheet.hidden = false; const id = chat.id;
   const name = h("input", { value: chat.title || "" });
@@ -1112,7 +1114,7 @@ function fileItem(path, e) {
   return h("li", { class: "card file" }, a, meta, err);
 }
 async function showFiles(rel) {
-  if (chat) { chat.close(); chat = null; }
+  leaveViews();
   setHeader("Files", { back: true });
   $("#view").replaceChildren(h("p", { class: "muted center" }, "Loading…"));
   const me = await api("GET", "/api/me"); if (me.needsPassword && !me.unlocked) return showLock();
@@ -1268,19 +1270,215 @@ const KB = (() => {
   return { apply, on, get frac() { return frac; } };
 })();
 
+// ---------- terminals ----------
+// Shells that stay open on this computer: leaving the page, losing the connection or switching devices only detaches
+// this view. The list on the home screen shows each one (what's running in it, how long ago it was used) with a close
+// button; opening one reattaches and replays its recent output. xterm.js is loaded only when a terminal is opened.
+let termv = null;
+function leaveViews() { if (chat) { chat.close(); chat = null; } if (termv) { termv.close(); termv = null; } }
+const loadOnce = {};
+function loadAsset(src) {
+  return loadOnce[src] ||= new Promise((res, rej) => {
+    const el = src.endsWith(".css") ? h("link", { rel: "stylesheet", href: src }) : h("script", { src });
+    el.onload = res; el.onerror = () => { delete loadOnce[src]; rej(new Error(`couldn't load ${src}`)); };
+    document.head.append(el);
+  });
+}
+/**
+ * xterm.js sizes and colours its cells with <style> elements it writes at run time, which Hearth's Content-Security-
+ * Policy (style-src 'self') refuses to apply. While terminals are in use, a <style> made with createElement becomes an
+ * inert <hearth-style> (hidden by style.css; nothing else in Hearth makes <style> elements, the policy forbids them),
+ * and its text is mirrored into constructed style sheets, which the policy allows.
+ */
+let styleShim = false;
+function mirrorStyles(roots) {
+  if (!("adoptedStyleSheets" in document) || typeof CSSStyleSheet !== "function") return () => {};
+  if (!styleShim) {
+    styleShim = true;
+    const make = Document.prototype.createElement;
+    document.createElement = function (tag, opts) { return make.call(this, String(tag).toLowerCase() === "style" ? "hearth-style" : tag, opts); };
+  }
+  const sheets = new Map();
+  const sync = () => {
+    for (const r of roots) for (const el of r.querySelectorAll("hearth-style")) {
+      let s = sheets.get(el); if (!s) { s = { sheet: new CSSStyleSheet(), text: null }; sheets.set(el, s); }
+      if (s.text !== el.textContent) { s.text = el.textContent; try { s.sheet.replaceSync(s.text); } catch { /* bad css */ } }
+    }
+    for (const [el, s] of sheets) if (!el.isConnected) { sheets.delete(el); document.adoptedStyleSheets = document.adoptedStyleSheets.filter((x) => x !== s.sheet); }
+    const want = [...sheets.values()].map((s) => s.sheet), cur = document.adoptedStyleSheets;
+    if (want.some((x) => !cur.includes(x))) document.adoptedStyleSheets = [...cur.filter((x) => !want.includes(x)), ...want];
+  };
+  const mo = new MutationObserver(sync);
+  for (const r of roots) mo.observe(r, { subtree: true, childList: true, characterData: true });
+  sync();
+  return () => { mo.disconnect(); const mine = new Set([...sheets.values()].map((s) => s.sheet)); document.adoptedStyleSheets = document.adoptedStyleSheets.filter((x) => !mine.has(x)); };
+}
+function termStatus(t) {
+  if (t.state === "exited") return t.signal ? `ended (${t.signal})` : `ended (exit ${t.exitCode ?? "?"})`;
+  return t.running ? `running ${t.running}` : "open";
+}
+function terminalRow(t, refresh) {
+  const closeBtn = h("button", { class: "iconbtn danger", title: t.state === "exited" ? "Remove from the list" : "Close this terminal (stops what's running in it)",
+    "aria-label": t.state === "exited" ? `Remove ${t.title}` : `Close ${t.title}`, onclick: async (e) => {
+      e.stopPropagation();
+      if (t.state !== "exited" && !confirm(`Close “${t.title}”?${t.running ? ` ${t.running} and anything else` : " Anything"} running in it will be stopped.`)) return;
+      closeBtn.disabled = true;
+      try { await api("DELETE", `/api/terminals/${t.id}${t.state === "exited" ? "" : "?remove=1"}`); } catch (x) { alert(x.message); }
+      refresh();
+    } }, ico("x"));
+  const pill = t.state === "exited" ? "exited" : t.running ? "running" : "open";
+  return h("li", { class: "card session term-row", onclick: () => { location.hash = `#/t/${t.id}`; } },
+    h("div", { class: "row" }, h("strong", {}, t.title), h("span", { class: "row tight" }, h("span", { class: `pill ${pill}` }, termStatus(t)), closeBtn)),
+    h("div", { class: "meta" }, `${short(t.cwd)} · ${t.state === "exited" ? "ended " + ago(t.exitedAt) : "used " + ago(t.lastActivity)}${t.viewers ? ` · ${t.viewers} viewing` : ""}`));
+}
+/** The Terminals section of the home screen; refreshes itself every few seconds while it is on screen. */
+function terminalsSection(initial) {
+  const list = h("ul", { class: "list" }); const err = h("p", { class: "err center", hidden: true });
+  const sec = h("section", { class: "terms" },
+    h("div", { class: "toolbar sub" }, h("h2", { class: "sect" }, "Terminals"), h("button", { onclick: newTerminal, title: "A shell on this computer that stays open when you leave" }, "+ New terminal")),
+    err, list);
+  let timer = 0;
+  const render = (ts) => {
+    list.replaceChildren(...(ts.length ? ts.map((t) => terminalRow(t, refresh)) : [h("li", { class: "muted center small" }, "No terminals open. They keep running on this computer when you close the page.")]));
+  };
+  const tick = () => { if (!sec.isConnected) return; if (document.visibilityState === "visible") refresh(); else timer = setTimeout(tick, 5000); };
+  async function refresh() {
+    clearTimeout(timer);
+    try { render(await api("GET", "/api/terminals")); err.hidden = true; } catch (x) { if (x.message !== "locked") { err.textContent = x.message; err.hidden = false; } }
+    timer = setTimeout(tick, 5000);
+  }
+  render(initial || []);
+  timer = setTimeout(tick, 5000);
+  return sec;
+}
+async function newTerminal() {
+  try {
+    const cols = Math.max(20, Math.floor((innerWidth - 16) / 7.8)), rows = Math.max(8, Math.floor((innerHeight - 140) / 17));
+    const t = await api("POST", "/api/terminals", { cols, rows });
+    location.hash = `#/t/${t.id}`;
+  } catch (x) { if (x.message !== "locked") alert(x.message); }
+}
+const TERM_KEYS = [["Esc", "\x1b"], ["Tab", "\t"], ["Ctrl", null], ["↑", "\x1b[A"], ["↓", "\x1b[B"], ["←", "\x1b[D"], ["→", "\x1b[C"], ["^C", "\x03"], ["^D", "\x04"], ["|", "|"], ["~", "~"], ["/", "/"], ["-", "-"]];
+class TermView {
+  constructor(info) {
+    this.id = info.id; this.info = info; this.closed = false; this.retry = 0; this.ctrl = false; this.ws = null;
+    this.host = h("div", { class: "term-host" });
+    this.banner = h("div", { class: "term-banner", hidden: true });
+    const keys = TERM_KEYS.map(([label, seq]) => {
+      const b = h("button", { type: "button", class: seq === null ? "mod" : "", "aria-label": label === "^C" ? "Control C" : label === "^D" ? "Control D" : label }, label);
+      b.addEventListener("pointerdown", (e) => e.preventDefault()); // keep the on-screen keyboard up
+      b.onclick = () => { if (seq === null) { this.ctrl = !this.ctrl; b.classList.toggle("on", this.ctrl); } else this.send(seq); this.term?.focus(); };
+      return b;
+    });
+    this.ctrlBtn = keys[2];
+    this.keybar = h("div", { class: "term-keys", role: "toolbar", "aria-label": "Terminal keys" }, keys);
+    $("#view").replaceChildren(h("div", { class: "term-wrap" }, this.banner, this.host, this.keybar));
+    this.start().catch((e) => this.show(`Couldn't open the terminal: ${e.message}`));
+  }
+  async start() {
+    await Promise.all([loadAsset("xterm.css"), loadAsset("xterm.js"), loadAsset("xterm-fit.js")]);
+    if (this.closed) return;
+    const coarse = matchMedia("(pointer: coarse)").matches;
+    this.term = new window.Terminal({ fontFamily: 'ui-monospace, "SF Mono", Menlo, Consolas, monospace', fontSize: coarse ? 12 : 13, cursorBlink: true, scrollback: 5000,
+      allowProposedApi: false, macOptionIsMeta: true, theme: { background: "#14161a", foreground: "#e7e9ee", cursor: "#f2994a", selectionBackground: "#f2994a55" } });
+    this.fit = new window.FitAddon.FitAddon(); this.term.loadAddon(this.fit);
+    this.unmirror = mirrorStyles([this.host, document.head]);
+    this.term.open(this.host);
+    this.term.onData((d) => {
+      if (this.ctrl && d.length === 1) { const c = d.toUpperCase().charCodeAt(0); if (c >= 64 && c <= 95) d = String.fromCharCode(c - 64); this.ctrl = false; this.ctrlBtn.classList.remove("on"); }
+      this.send(d);
+    });
+    this.term.onResize(({ cols, rows }) => this.sendJson({ type: "resize", cols, rows }));
+    this.term.onTitleChange((t) => { if (t && !this.closed) document.title = `${t} · Hearth`; });
+    this.ro = new ResizeObserver(() => this.refit()); this.ro.observe(this.host);
+    this.refit();
+    this.onVis = () => { if (document.visibilityState === "visible" && (!this.ws || this.ws.readyState > 1) && this.info.state !== "exited") this.connect(); };
+    document.addEventListener("visibilitychange", this.onVis);
+    this.connect();
+    if (!coarse) this.term.focus();
+  }
+  refit() { if (this.closed || !this.fit || !this.host.clientHeight) return; try { this.fit.fit(); } catch { /* not laid out */ } }
+  send(d) { this.sendJson({ type: "input", data: d }); }
+  sendJson(m) { if (this.ws && this.ws.readyState === 1) this.ws.send(JSON.stringify(m)); }
+  show(text, buttons = []) { this.banner.replaceChildren(h("span", {}, text), ...buttons); this.banner.hidden = !text; }
+  connect() {
+    if (this.closed) return;
+    const ws = this.ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${location.pathname.replace(/[^/]*$/, "")}ws/term?id=${this.id}`);
+    ws.binaryType = "arraybuffer";
+    let hello = false;
+    ws.onmessage = (e) => {
+      if (typeof e.data !== "string") { this.term.write(new Uint8Array(e.data)); return; }
+      let m; try { m = JSON.parse(e.data); } catch { return; }
+      if (m.type === "hello") {
+        hello = true; this.retry = 0; this.term.reset(); this.info = m.terminal; this.show("");
+        setHeader(m.terminal.title, { back: true, menu: true, status: m.terminal.state === "exited" ? "exited" : "open" });
+        this.refit(); this.sendJson({ type: "resize", cols: this.term.cols, rows: this.term.rows });
+      } else if (m.type === "info") { this.info = m.terminal; $("#title").textContent = m.terminal.title; }
+      else if (m.type === "exit") { this.info = m.terminal; this.ended(); }
+    };
+    ws.onclose = () => {
+      if (this.closed || this.info.state === "exited" || ws !== this.ws) return;
+      if (!hello) this.retry++;
+      if (this.retry > 3) return this.gone();
+      this.show("Reconnecting…"); setHeader(this.info.title, { back: true, menu: true, status: "offline" });
+      setTimeout(() => { if (!this.closed && document.visibilityState === "visible") this.connect(); }, Math.min(5000, 500 * 2 ** this.retry));
+    };
+  }
+  async gone() {
+    try { const t = await api("GET", `/api/terminals/${this.id}`); this.info = t; if (t.state === "exited") return this.ended(); this.retry = 0; this.connect(); }
+    catch (x) { if (x.message !== "locked") this.show("This terminal is gone (closed, or this computer restarted).", [h("button", { onclick: newTerminal }, "New terminal")]); }
+  }
+  ended() {
+    setHeader(this.info.title, { back: true, menu: true, status: "exited" });
+    this.show(`The shell ${termStatus(this.info)}.`, [
+      h("button", { onclick: async () => { try { await api("DELETE", `/api/terminals/${this.id}`); } catch { /* already gone */ } location.hash = "#/"; } }, "Remove"),
+      h("button", { class: "primary", onclick: newTerminal }, "New terminal")]);
+  }
+  close() {
+    this.closed = true; document.title = "Hearth";
+    try { this.ws?.close(); } catch { /* closed */ }
+    if (this.onVis) document.removeEventListener("visibilitychange", this.onVis);
+    this.ro?.disconnect(); this.term?.dispose(); this.unmirror?.();
+  }
+}
+function terminalMenu() {
+  const t = termv; if (!t) return;
+  const sheet = $("#sheet"); sheet.hidden = false;
+  const name = h("input", { value: t.info.title || "", "aria-label": "Name" }); const err = h("p", { class: "err" });
+  const running = t.info.state !== "exited";
+  sheet.replaceChildren(h("div", { class: "sheet-body" }, h("h2", {}, "Terminal"),
+    h("p", { class: "muted small" }, `${short(t.info.cwd)} · started ${ago(t.info.createdAt)}. It stays open on this computer when you leave this page.`),
+    h("label", {}, "Name"), name,
+    h("button", { onclick: async () => { try { await api("PATCH", `/api/terminals/${t.id}`, { title: name.value }); sheet.hidden = true; } catch (x) { err.textContent = x.message; } } }, "Rename"),
+    h("button", { class: "danger", onclick: async () => {
+      if (running && !confirm("Close this terminal? Anything running in it will be stopped.")) return;
+      try { await api("DELETE", `/api/terminals/${t.id}?remove=1`); sheet.hidden = true; location.hash = "#/"; } catch (x) { err.textContent = x.message; }
+    } }, running ? "Close terminal" : "Remove"),
+    err, h("button", { onclick: () => { sheet.hidden = true; } }, "Cancel")));
+}
+
 // ---------- routing ----------
 async function route() {
   $("#sheet").hidden = true;
   const m = /^#\/s\/([a-f0-9-]{36})$/.exec(location.hash);
   const fm = /^#\/files(?:\?p=(.*))?$/.exec(location.hash);
+  const tm = /^#\/t\/([a-f0-9]{16})$/.exec(location.hash);
   try {
+    if (tm) {
+      const me = await api("GET", "/api/me"); if (me.needsPassword && !me.unlocked) return showLock();
+      const t = await api("GET", `/api/terminals/${tm[1]}`);
+      leaveViews();
+      setHeader(t.title, { back: true, menu: true, status: t.state === "exited" ? "exited" : "open" });
+      termv = new TermView(t);
+      return;
+    }
     if (fm) { let p = ""; try { p = decodeURIComponent(fm[1] || ""); } catch { /* bad escape */ } await showFiles(p); }
     else if (m) {
       const me = await api("GET", "/api/me"); if (me.needsPassword && !me.unlocked) return showLock();
       Voice.enabled = !!me.voice;
       if (!agents.length) agents = await api("GET", "/api/agents");
       const s = await api("GET", `/api/sessions/${m[1]}`);
-      if (chat) chat.close();
+      leaveViews();
       setHeader(s.title, { back: true, menu: true, status: s.state });
       chat = new Chat(s.id); chat.title = s.title;
     } else await showList();
