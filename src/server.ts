@@ -694,10 +694,10 @@ export class Hearth {
     ws.on("error", () => {});
     ws.on("message", (raw, isBinary) => {
       if (isBinary) return t.input(Buffer.isBuffer(raw) ? raw : Buffer.from(raw as ArrayBuffer));
-      let m: { type?: string; data?: unknown; cols?: unknown; rows?: unknown };
+      let m: { type?: string; data?: unknown; cols?: unknown; rows?: unknown; redraw?: unknown };
       try { m = JSON.parse(String(raw)); } catch { return; }
       if (m.type === "input" && typeof m.data === "string") t.input(m.data);
-      else if (m.type === "resize") t.resize(Number(m.cols), Number(m.rows));
+      else if (m.type === "resize") t.resize(Number(m.cols), Number(m.rows), m.redraw === true);
     });
   }
 

@@ -72,6 +72,20 @@ describe("terminal registry", { skip }, () => {
     assert.equal(t.info().cols, 123);
   });
 
+  test("the same size again doesn't SIGWINCH the program (no needless full-screen repaints); a reattach's redraw does", async () => {
+    const t = T.create("alice", { cwd, cols: 80, rows: 24 });
+    const v = viewer(); t.attach(v);
+    t.input("n=0; trap 'n=$((n+1))' WINCH; echo armed\n");
+    await v.until((x) => x.out.includes("armed\r\n"));
+    t.resize(80, 24); t.resize(80, 24); await sleep(150);
+    t.input("echo w1=$n\n"); await v.until((x) => /w1=\d/.test(x.out));
+    assert.match(v.out, /w1=0/, "same size: nothing sent");
+    t.resize(90, 24); await sleep(150); t.resize(90, 24, true); await sleep(150);
+    t.input("echo w2=$n\n"); await v.until((x) => /w2=\d/.test(x.out));
+    assert.match(v.out, /w2=2/, "a real change, then an asked-for redraw");
+    await t.close();
+  });
+
   test("the shell exiting ends the terminal: exit code, an exit event, kept in the list until removed", async () => {
     const t = T.create("alice", { cwd });
     const v = viewer(); t.attach(v);

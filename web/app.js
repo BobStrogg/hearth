@@ -46,7 +46,7 @@ async function api(method, path, body) {
   const r = await fetch(path, { method, headers: { "content-type": "application/json", "x-hearth-csrf": "1" }, body: body ? JSON.stringify(body) : undefined, credentials: "same-origin" });
   const j = await r.json().catch(() => ({}));
   if (r.status === 423) { showLock(); throw new Error("locked"); }
-  if (!r.ok) throw new Error(j.error || r.statusText);
+  if (!r.ok) throw Object.assign(new Error(j.error || r.statusText || `HTTP ${r.status}`), { status: r.status });
   return j;
 }
 const ago = (iso) => { const s = (Date.now() - new Date(iso)) / 1000; return s < 60 ? "just now" : s < 3600 ? `${Math.floor(s / 60)}m ago` : s < 86400 ? `${Math.floor(s / 3600)}h ago` : new Date(iso).toLocaleDateString(); };
@@ -88,10 +88,17 @@ async function showList() {
   $("#view").replaceChildren(
     h("div", { class: "toolbar" }, h("span", { class: "muted" }, me.user), h("div", { class: "row" },
       me.files ? h("button", { onclick: () => { location.hash = "#/files"; }, title: "Browse, download and upload files on this computer" }, ico("folder"), " Files") : null,
+      terms ? h("button", { onclick: showTerminals, title: "Shells kept open on this computer (+ New terminal)" }, "⌨ Terminals") : null,
       me.push ? h("button", { onclick: notifySheet, title: "Notifications on this device", "aria-label": "Notifications" }, ico("bell")) : null,
       h("button", { onclick: importSessions }, "Import existing"), h("button", { class: "primary", onclick: newSession }, "+ New session"))),
     items.length ? h("ul", { class: "list" }, items) : h("p", { class: "muted center" }, "No sessions yet."),
     terms ? terminalsSection(terms) : null, versionBar());
+  if (location.hash === "#/terminals") showTerminals();
+}
+// #/terminals (e.g. a "Terminals" link from elsewhere) opens the home screen at its Terminals section
+function showTerminals() {
+  if (location.hash !== "#/terminals") { location.hash = "#/terminals"; return; }
+  $("#view section.terms")?.scrollIntoView({ block: "start" });
 }
 
 // ---------- version / update ----------
@@ -1388,18 +1395,32 @@ class TermView {
       if (this.ctrl && d.length === 1) { const c = d.toUpperCase().charCodeAt(0); if (c >= 64 && c <= 95) d = String.fromCharCode(c - 64); this.ctrl = false; this.ctrlBtn.classList.remove("on"); }
       this.send(d);
     });
-    this.term.onResize(({ cols, rows }) => this.sendJson({ type: "resize", cols, rows }));
+    this.term.onResize(() => this.queueResize());
     this.term.onTitleChange((t) => { if (t && !this.closed) document.title = `${t} · Hearth`; });
     this.ro = new ResizeObserver(() => this.refit()); this.ro.observe(this.host);
     this.refit();
-    this.onVis = () => { if (document.visibilityState === "visible" && (!this.ws || this.ws.readyState > 1) && this.info.state !== "exited") this.connect(); };
+    this.onVis = () => { if (document.visibilityState === "visible" && (!this.ws || this.ws.readyState > 1) && this.info.state !== "exited") { this.retry = 0; this.connect(); } };
     document.addEventListener("visibilitychange", this.onVis);
     this.connect();
     if (!coarse) this.term.focus();
   }
   refit() { if (this.closed || !this.fit || !this.host.clientHeight) return; try { this.fit.fit(); } catch { /* not laid out */ } }
   send(d) { this.sendJson({ type: "input", data: d }); }
-  sendJson(m) { if (this.ws && this.ws.readyState === 1) this.ws.send(JSON.stringify(m)); }
+  sendJson(m) { if (this.ws && this.ws.readyState === 1) { this.ws.send(JSON.stringify(m)); return true; } return false; }
+  /**
+   * Tell the computer the new size once the layout has settled. A phone keyboard sliding in or out (or a rotation)
+   * resizes the page over several frames; every size sent becomes a SIGWINCH, and full-screen programs such as CLI agents
+   * repaint everything on each one. So: only the final size, and only if it differs from what the program already has.
+   */
+  queueResize(ms = 250) {
+    clearTimeout(this.resizeTimer);
+    this.resizeTimer = setTimeout(() => {
+      if (this.closed || !this.term) return;
+      const { cols, rows } = this.term;
+      if (this.sentSize === `${cols}x${rows}`) return;
+      if (this.sendJson({ type: "resize", cols, rows })) this.sentSize = `${cols}x${rows}`;
+    }, ms);
+  }
   show(text, buttons = []) { this.banner.replaceChildren(h("span", {}, text), ...buttons); this.banner.hidden = !text; }
   connect() {
     if (this.closed) return;
@@ -1412,7 +1433,9 @@ class TermView {
       if (m.type === "hello") {
         hello = true; this.retry = 0; this.term.reset(); this.info = m.terminal; this.show("");
         setHeader(m.terminal.title, { back: true, menu: true, status: m.terminal.state === "exited" ? "exited" : "open" });
-        this.refit(); this.sendJson({ type: "resize", cols: this.term.cols, rows: this.term.rows });
+        this.refit(); clearTimeout(this.resizeTimer);
+        // (Re)attached: send the size, and ask for one redraw so a full-screen program repaints over the replay.
+        if (this.sendJson({ type: "resize", cols: this.term.cols, rows: this.term.rows, redraw: true })) this.sentSize = `${this.term.cols}x${this.term.rows}`;
       } else if (m.type === "info") { this.info = m.terminal; $("#title").textContent = m.terminal.title; }
       else if (m.type === "exit") { this.info = m.terminal; this.ended(); }
     };
@@ -1425,8 +1448,19 @@ class TermView {
     };
   }
   async gone() {
+    clearTimeout(this.offlineTimer);
+    if (this.closed) return;
     try { const t = await api("GET", `/api/terminals/${this.id}`); this.info = t; if (t.state === "exited") return this.ended(); this.retry = 0; this.connect(); }
-    catch (x) { if (x.message !== "locked") this.show("This terminal is gone (closed, or this computer restarted).", [h("button", { onclick: newTerminal }, "New terminal")]); }
+    catch (x) {
+      if (x.message === "locked" || this.closed) return;
+      if (x.status === 404) return this.show("This terminal is gone (closed, or Hearth restarted).", [h("button", { onclick: newTerminal }, "New terminal")]);
+      // Not a "no such terminal": the computer is asleep or offline, the tunnel is down, or the sign-in expired. The
+      // shell is still running on the computer, so keep trying instead of declaring it gone.
+      this.show("Can't reach this computer right now (asleep, offline, or your sign-in expired). The terminal keeps running there; retrying…",
+        [h("button", { onclick: () => this.gone() }, "Retry now"), h("button", { onclick: () => location.reload() }, "Reload")]);
+      setHeader(this.info.title, { back: true, menu: true, status: "offline" });
+      this.offlineTimer = setTimeout(() => { if (document.visibilityState === "visible") this.gone(); }, 10_000);
+    }
   }
   ended() {
     setHeader(this.info.title, { back: true, menu: true, status: "exited" });
@@ -1435,7 +1469,7 @@ class TermView {
       h("button", { class: "primary", onclick: newTerminal }, "New terminal")]);
   }
   close() {
-    this.closed = true; document.title = "Hearth";
+    this.closed = true; document.title = "Hearth"; clearTimeout(this.offlineTimer); clearTimeout(this.resizeTimer);
     try { this.ws?.close(); } catch { /* closed */ }
     if (this.onVis) document.removeEventListener("visibilitychange", this.onVis);
     this.ro?.disconnect(); this.term?.dispose(); this.unmirror?.();

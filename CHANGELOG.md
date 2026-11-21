@@ -1,6 +1,14 @@
 # Changelog
 
 ## Unreleased
+- Terminals: the phone keyboard sliding in or out, or a rotation, now sends the computer one resize when the layout
+  settles instead of one per animation frame, and the same size is never re-sent. Full-screen programs (CLI agents such
+  as Devin) repaint everything on each resize, so the terminal no longer replays its whole screen several times over.
+- Terminals: when the computer can't be reached (asleep, offline, tunnel down, sign-in expired) an open terminal now says so
+  and keeps retrying, instead of claiming the terminal is gone. Only a terminal Hearth really no longer has is reported
+  as gone.
+- A *Terminals* button at the top of the home screen jumps to the terminal list, and `#/terminals` opens the home
+  screen there (so a link from elsewhere, like a home dashboard, lands on the list instead of below every session).
 
 ## 0.9.1
 - Release build only: the macOS arm64 binary is built on the `macos-15` runner (GitHub retired `macos-14`, so the

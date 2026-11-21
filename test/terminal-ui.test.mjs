@@ -76,3 +76,72 @@ for (const [name, vp] of [["desktop", { width: 1100, height: 760 }], ["phone", {
     await page.close();
   });
 }
+
+test("#/terminals opens the home screen at the Terminals section; the toolbar has a Terminals button", async (t) => {
+  if (skip) return t.skip(skip);
+  const page = await browser.newPage(); await page.setViewport({ width: 390, height: 500, isMobile: true, hasTouch: true });
+  await page.goto(base + "/#/terminals"); await page.waitForSelector("section.terms");
+  assert.ok(await page.$$eval(".toolbar button", (bs) => bs.some((b) => /Terminals/.test(b.textContent))), "Terminals button");
+  await until(() => page.$eval("section.terms", (e) => { const r = e.getBoundingClientRect(); return r.top >= -1 && r.top < innerHeight; }));
+  await page.close();
+});
+
+test("an unreachable computer is reported as unreachable (and retried), not as a gone terminal", async (t) => {
+  if (skip) return t.skip(skip);
+  const page = await browser.newPage(); await page.setViewport({ width: 390, height: 700, isMobile: true, hasTouch: true });
+  page.on("dialog", (d) => d.accept());
+  await page.goto(base + "/#/"); await page.waitForSelector("section.terms");
+  await page.$$eval("section.terms button", (bs) => bs.find((b) => /New terminal/.test(b.textContent)).click());
+  await page.waitForSelector(".xterm-rows"); await until(async () => /\$|#/.test(await screen(page)));
+  const id = await page.evaluate(() => termv.id);
+  // The tunnel goes away: the terminal's API answers like Cloudflare does for an offline origin (530), and sockets can't connect.
+  await page.evaluate((id) => {
+    const realFetch = window.fetch, RealWS = window.WebSocket; window.__down = true;
+    window.fetch = (u, o) => (window.__down && String(u).includes(`/api/terminals/${id}`) ? Promise.resolve(new Response("<h1>Error 1033</h1>", { status: 530, headers: { "content-type": "text/html" } })) : realFetch(u, o));
+    window.WebSocket = class extends RealWS { constructor(u) { super(window.__down ? u.replace("ws/term", "ws/nope") : u); } };
+    termv.ws.close();
+  }, id);
+  const banner = () => page.$eval(".term-banner", (e) => (e.hidden ? "" : e.textContent));
+  await until(async () => /Can.t reach this computer/.test(await banner()), 20000);
+  assert.doesNotMatch(await banner(), /gone/);
+  // It comes back: the retry reattaches by itself and the shell is still there.
+  await page.evaluate(() => { window.__down = false; });
+  await page.$$eval(".term-banner button", (bs) => bs.find((b) => /Retry/.test(b.textContent)).click());
+  await until(async () => (await banner()) === "", 10000);
+  await page.click(".term-host"); await page.keyboard.type("echo back-$((6*7))\n");
+  await until(async () => (await screen(page)).includes("back-42"));
+  await page.evaluate(async (id) => { await fetch(`/api/terminals/${id}?remove=1`, { method: "DELETE", headers: { "x-hearth-csrf": "1" } }); }, id);
+  await page.close();
+});
+
+test("the keyboard opening/closing or a rotation sends the program one resize (one SIGWINCH), not one per animation frame, and never reconnects", async (t) => {
+  if (skip) return t.skip(skip);
+  const page = await browser.newPage(); await page.setViewport({ width: 390, height: 760, isMobile: true, hasTouch: true });
+  page.on("dialog", (d) => d.accept());
+  await page.goto(base + "/#/"); await page.waitForSelector("section.terms");
+  await page.$$eval("section.terms button", (bs) => bs.find((b) => /New terminal/.test(b.textContent)).click());
+  await page.waitForSelector(".xterm-rows"); await until(async () => /\$|#/.test(await screen(page)));
+  const id = await page.evaluate(() => termv.id);
+  await page.click(".term-host"); await page.keyboard.type("n=0; trap 'n=$((n+1))' WINCH; clear\n");
+  await sleep(600);
+  const ws0 = await page.evaluate(() => { window.__ws0 = termv.ws; return termv.ws.readyState; });
+  // An iPhone keyboard slides up over ~300 ms: the visual viewport shrinks in steps, then grows back when it hides.
+  const steps = [720, 680, 640, 600, 560, 520, 480, 440, 420];
+  for (const hgt of steps) { await page.setViewport({ width: 390, height: hgt, isMobile: true, hasTouch: true }); await sleep(30); }
+  await sleep(700);
+  for (const hgt of [...steps].reverse().concat(760)) { await page.setViewport({ width: 390, height: hgt, isMobile: true, hasTouch: true }); await sleep(30); }
+  await sleep(700);
+  // Rotation, then back.
+  await page.setViewport({ width: 760, height: 390, isMobile: true, hasTouch: true }); await sleep(700);
+  await page.setViewport({ width: 390, height: 760, isMobile: true, hasTouch: true }); await sleep(700);
+  await page.keyboard.type("echo winches-$n\n");
+  const out = await until(async () => /winches-(\d+)/.exec(await screen(page)));
+  const n = Number(out[1]); t.diagnostic(`SIGWINCHes seen: ${n}`);
+  // 4 changes, 40 viewport steps: one SIGWINCH per change (a slow machine may split one change in two).
+  assert.ok(n >= 2 && n <= 8, `the program saw ${n} resizes for keyboard up, down, rotate and back (want about one each, not one per step)`);
+  assert.equal(await page.evaluate(() => termv.ws === window.__ws0 && termv.ws.readyState === 1), true, "same connection: a resize never reconnects or replays");
+  const info = await page.evaluate(async (id) => (await fetch(`/api/terminals/${id}`)).json(), id);
+  assert.deepEqual([info.cols, info.rows], await page.evaluate(() => [termv.term.cols, termv.term.rows]), "the program ends up with the size on screen");
+  await page.evaluate(async (id) => { await fetch(`/api/terminals/${id}?remove=1`, { method: "DELETE", headers: { "x-hearth-csrf": "1" } }); }, id);
+  await page.close();
+});
