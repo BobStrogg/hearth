@@ -1395,7 +1395,7 @@ class TermView {
       if (this.ctrl && d.length === 1) { const c = d.toUpperCase().charCodeAt(0); if (c >= 64 && c <= 95) d = String.fromCharCode(c - 64); this.ctrl = false; this.ctrlBtn.classList.remove("on"); }
       this.send(d);
     });
-    this.term.onResize(({ cols, rows }) => this.sendJson({ type: "resize", cols, rows }));
+    this.term.onResize(() => this.queueResize());
     this.term.onTitleChange((t) => { if (t && !this.closed) document.title = `${t} · Hearth`; });
     this.ro = new ResizeObserver(() => this.refit()); this.ro.observe(this.host);
     this.refit();
@@ -1406,7 +1406,21 @@ class TermView {
   }
   refit() { if (this.closed || !this.fit || !this.host.clientHeight) return; try { this.fit.fit(); } catch { /* not laid out */ } }
   send(d) { this.sendJson({ type: "input", data: d }); }
-  sendJson(m) { if (this.ws && this.ws.readyState === 1) this.ws.send(JSON.stringify(m)); }
+  sendJson(m) { if (this.ws && this.ws.readyState === 1) { this.ws.send(JSON.stringify(m)); return true; } return false; }
+  /**
+   * Tell the computer the new size once the layout has settled. A phone keyboard sliding in or out (or a rotation)
+   * resizes the page over several frames; every size sent becomes a SIGWINCH, and full-screen programs such as CLI agents
+   * repaint everything on each one. So: only the final size, and only if it differs from what the program already has.
+   */
+  queueResize(ms = 250) {
+    clearTimeout(this.resizeTimer);
+    this.resizeTimer = setTimeout(() => {
+      if (this.closed || !this.term) return;
+      const { cols, rows } = this.term;
+      if (this.sentSize === `${cols}x${rows}`) return;
+      if (this.sendJson({ type: "resize", cols, rows })) this.sentSize = `${cols}x${rows}`;
+    }, ms);
+  }
   show(text, buttons = []) { this.banner.replaceChildren(h("span", {}, text), ...buttons); this.banner.hidden = !text; }
   connect() {
     if (this.closed) return;
@@ -1419,7 +1433,9 @@ class TermView {
       if (m.type === "hello") {
         hello = true; this.retry = 0; this.term.reset(); this.info = m.terminal; this.show("");
         setHeader(m.terminal.title, { back: true, menu: true, status: m.terminal.state === "exited" ? "exited" : "open" });
-        this.refit(); this.sendJson({ type: "resize", cols: this.term.cols, rows: this.term.rows });
+        this.refit(); clearTimeout(this.resizeTimer);
+        // (Re)attached: send the size, and ask for one redraw so a full-screen program repaints over the replay.
+        if (this.sendJson({ type: "resize", cols: this.term.cols, rows: this.term.rows, redraw: true })) this.sentSize = `${this.term.cols}x${this.term.rows}`;
       } else if (m.type === "info") { this.info = m.terminal; $("#title").textContent = m.terminal.title; }
       else if (m.type === "exit") { this.info = m.terminal; this.ended(); }
     };
@@ -1453,7 +1469,7 @@ class TermView {
       h("button", { class: "primary", onclick: newTerminal }, "New terminal")]);
   }
   close() {
-    this.closed = true; document.title = "Hearth"; clearTimeout(this.offlineTimer);
+    this.closed = true; document.title = "Hearth"; clearTimeout(this.offlineTimer); clearTimeout(this.resizeTimer);
     try { this.ws?.close(); } catch { /* closed */ }
     if (this.onVis) document.removeEventListener("visibilitychange", this.onVis);
     this.ro?.disconnect(); this.term?.dispose(); this.unmirror?.();

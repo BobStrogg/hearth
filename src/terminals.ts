@@ -140,8 +140,10 @@ export class Term {
     this.lastActivity = Date.now();
     this.proc.stdin!.write(data);
   }
-  resize(cols: number, rows: number) {
+  /** Resize the pty; the helper SIGWINCHes the foreground program. The same size again is ignored unless `redraw` (a reattach asks for one repaint). */
+  resize(cols: number, rows: number, redraw = false) {
     if (this.state !== "running" || !Number.isInteger(cols) || !Number.isInteger(rows) || cols < 2 || rows < 1 || cols > 999 || rows > 999) return;
+    if (!redraw && cols === this.cols && rows === this.rows) return;
     this.cols = cols; this.rows = rows;
     (this.proc.stdio[3] as import("node:net").Socket).write(`R ${cols} ${rows}\n`);
   }

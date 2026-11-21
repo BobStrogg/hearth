@@ -113,3 +113,34 @@ test("an unreachable computer is reported as unreachable (and retried), not as a
   await page.evaluate(async (id) => { await fetch(`/api/terminals/${id}?remove=1`, { method: "DELETE", headers: { "x-hearth-csrf": "1" } }); }, id);
   await page.close();
 });
+
+test("the keyboard opening/closing or a rotation sends the program one resize (one SIGWINCH), not one per animation frame, and never reconnects", async (t) => {
+  if (skip) return t.skip(skip);
+  const page = await browser.newPage(); await page.setViewport({ width: 390, height: 760, isMobile: true, hasTouch: true });
+  page.on("dialog", (d) => d.accept());
+  await page.goto(base + "/#/"); await page.waitForSelector("section.terms");
+  await page.$$eval("section.terms button", (bs) => bs.find((b) => /New terminal/.test(b.textContent)).click());
+  await page.waitForSelector(".xterm-rows"); await until(async () => /\$|#/.test(await screen(page)));
+  const id = await page.evaluate(() => termv.id);
+  await page.click(".term-host"); await page.keyboard.type("n=0; trap 'n=$((n+1))' WINCH; clear\n");
+  await sleep(600);
+  const ws0 = await page.evaluate(() => { window.__ws0 = termv.ws; return termv.ws.readyState; });
+  // An iPhone keyboard slides up over ~300 ms: the visual viewport shrinks in steps, then grows back when it hides.
+  const steps = [720, 680, 640, 600, 560, 520, 480, 440, 420];
+  for (const hgt of steps) { await page.setViewport({ width: 390, height: hgt, isMobile: true, hasTouch: true }); await sleep(30); }
+  await sleep(700);
+  for (const hgt of [...steps].reverse().concat(760)) { await page.setViewport({ width: 390, height: hgt, isMobile: true, hasTouch: true }); await sleep(30); }
+  await sleep(700);
+  // Rotation, then back.
+  await page.setViewport({ width: 760, height: 390, isMobile: true, hasTouch: true }); await sleep(700);
+  await page.setViewport({ width: 390, height: 760, isMobile: true, hasTouch: true }); await sleep(700);
+  await page.keyboard.type("echo winches-$n\n");
+  const out = await until(async () => /winches-(\d+)/.exec(await screen(page)));
+  const n = Number(out[1]); t.diagnostic(`SIGWINCHes seen: ${n}`);
+  assert.ok(n >= 2 && n <= 4, `the program saw ${n} resizes for keyboard up, down, rotate and back (want 2-4: one each, at most)`);
+  assert.equal(await page.evaluate(() => termv.ws === window.__ws0 && termv.ws.readyState === 1), true, "same connection: a resize never reconnects or replays");
+  const info = await page.evaluate(async (id) => (await fetch(`/api/terminals/${id}`)).json(), id);
+  assert.deepEqual([info.cols, info.rows], await page.evaluate(() => [termv.term.cols, termv.term.rows]), "the program ends up with the size on screen");
+  await page.evaluate(async (id) => { await fetch(`/api/terminals/${id}?remove=1`, { method: "DELETE", headers: { "x-hearth-csrf": "1" } }); }, id);
+  await page.close();
+});

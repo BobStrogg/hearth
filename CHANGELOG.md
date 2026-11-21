@@ -1,6 +1,9 @@
 # Changelog
 
 ## Unreleased
+- Terminals: the phone keyboard sliding in or out, or a rotation, now sends the computer one resize when the layout
+  settles instead of one per animation frame, and the same size is never re-sent. Full-screen programs (CLI agents such
+  as Devin) repaint everything on each resize, so the terminal no longer replays its whole screen several times over.
 - Terminals: when the computer can't be reached (asleep, offline, tunnel down, sign-in expired) an open terminal now says so
   and keeps retrying, instead of claiming the terminal is gone. Only a terminal Hearth really no longer has is reported
   as gone.
