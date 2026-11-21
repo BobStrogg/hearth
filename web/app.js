@@ -172,13 +172,16 @@ async function importSessions() {
       if (r.error && r.source !== "acp") err.textContent = r.error;
       if (!r.sessions.length) list.append(h("li", { class: "muted" }, "No sessions found."));
       for (const x of r.sessions) {
-        const btn = x.hearthId ? h("button", { onclick: () => { sheet.hidden = true; location.hash = `#/s/${x.hearthId}`; } }, "Open")
-          : h("button", { class: "primary", disabled: !r.importable || !x.allowed, onclick: async () => {
-              btn.disabled = true; btn.textContent = "Importing…";
+        // Already imported: "Open" also pulls in anything added to the session outside Hearth (e.g. in the agent's CLI).
+        const label = x.hearthId ? "Open" : "Import";
+        const rowErr = h("p", { class: "err" });
+        const btn = h("button", { class: x.hearthId ? "" : "primary", disabled: !r.importable || !x.allowed, onclick: async () => {
+              btn.disabled = true; btn.textContent = x.hearthId ? "Syncing…" : "Importing…"; rowErr.textContent = "";
               try { const s = await api("POST", "/api/sessions/import", { agentId: sel.value, agentSessionId: x.sessionId, cwd: x.cwd, title: x.title || undefined }); sheet.hidden = true; location.hash = `#/s/${s.id}`; }
-              catch (e) { err.textContent = e.message; btn.disabled = false; btn.textContent = "Import"; } } }, "Import");
+              // The error goes on this row (the sheet's own error line is out of sight when the list is scrolled).
+              catch (e) { rowErr.textContent = `Couldn't import: ${e.message}`; rowErr.scrollIntoView?.({ block: "nearest" }); btn.disabled = false; btn.textContent = label; } } }, label);
         list.append(h("li", { class: "ext" }, h("div", { class: "row" }, h("strong", {}, x.title || x.sessionId.slice(0, 12)), btn),
-          h("div", { class: "meta" }, `${short(x.cwd || "?")}${x.updatedAt ? " · " + ago(x.updatedAt) : ""}${x.allowed ? "" : " · outside allowed folders"}`)));
+          h("div", { class: "meta" }, `${short(x.cwd || "?")}${x.updatedAt ? " · " + ago(x.updatedAt) : ""}${x.allowed ? "" : " · outside allowed folders"}`), rowErr));
       }
     } catch (e) { info.textContent = ""; err.textContent = e.message; }
   }

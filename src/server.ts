@@ -129,6 +129,8 @@ export function sniffImage(b: Buffer, type: string): boolean {
 export class Hearth {
   store: Store; auth: Auth; agents: AgentDef[];
   live = new Map<string, LiveSession>();
+  /** How long an import request waits for the agent before answering 202 and letting the import finish in the background. */
+  static IMPORT_WAIT_MS = 60_000;
   server = createServer((q, s) => { this.http(q, s).catch((e) => this.send(s, 500, { error: String(e?.message ?? e) })); });
   wss = new WebSocketServer({ noServer: true, maxPayload: 8 * 1024 * 1024, perMessageDeflate: false });
   private deepCache = new Map<string, unknown>();
@@ -390,7 +392,10 @@ export class Hearth {
       const cwd = url.searchParams.get("cwd") || undefined;
       if (cwd && !this.cfg.roots.some((r) => within(r, cwd))) return this.send(s, 403, { error: "outside allowed roots" });
       const r = await listExternal(a, { cwd });
-      const mine = new Map(this.store.list(who).filter((m) => m.agentId === a.id && m.agentSessionId).map((m) => [m.agentSessionId!, m.id]));
+      // Only open sessions count as imported: a closed one can't be started again, so it must not turn "Import" into
+      // an "Open" that leads nowhere. Newest first in the list, so the newest open copy wins.
+      const mine = new Map<string, string>();
+      for (const m of this.store.list(who)) if (m.agentId === a.id && m.agentSessionId && m.state !== "exited" && !mine.has(m.agentSessionId)) mine.set(m.agentSessionId, m.id);
       return this.send(s, 200, { ...r, importable: r.canLoad || r.canResume,
         sessions: r.sessions.map((x) => ({ ...x, hearthId: mine.get(x.sessionId) ?? null, allowed: !!x.cwd && this.cfg.roots.some((root) => within(root, x.cwd)) })) });
     }
@@ -402,14 +407,26 @@ export class Hearth {
       const cwd = resolve(String(b.cwd ?? ""));
       if (!this.cfg.roots.some((r) => within(r, cwd)) || !statSync(cwd, { throwIfNoEntry: false })?.isDirectory()) return this.send(s, 400, { error: "the session's folder must exist inside the allowed roots" });
       const existing = this.store.list(who).find((m) => m.agentId === agent.id && m.agentSessionId === sidExt && m.state !== "exited");
-      if (existing) return this.send(s, 200, this.view(existing));
+      if (existing) {
+        // Already imported: importing again pulls in whatever was added to the agent's session outside Hearth (e.g. it
+        // was resumed in the agent's own CLI), by reloading it. Errors show in the session itself.
+        const l = this.liveFor(existing);
+        const sync = l.resync().catch(() => {});
+        await Promise.race([sync, new Promise((r) => setTimeout(r, Hearth.IMPORT_WAIT_MS).unref())]);
+        return this.send(s, 200, this.view(l.meta));
+      }
       const m = this.store.create(who, agent.id, cwd, String(b.title || "Imported session").slice(0, 120));
       m.agentSessionId = sidExt; m.seeded = false; m.importedFrom = { agentSessionId: sidExt, via: "pending" }; this.store.save(m);
       const l = this.liveFor(m);
-      try { await l.ensureRunning(); }
-      catch (e) {
+      const run = l.ensureRunning().then(() => null, (e: unknown) => e as Error);
+      // A long history can take longer to load than a proxy in front of Hearth waits for an answer (Cloudflare gives up
+      // after 100 s), and the browser then never hears how it went. Past IMPORT_WAIT_MS the import carries on and the
+      // client opens the session; if it fails later it stays there with the error, and starting it retries the import.
+      const r = await Promise.race([run, new Promise<"slow">((res) => setTimeout(() => res("slow"), Hearth.IMPORT_WAIT_MS).unref())]);
+      if (r === "slow") return this.send(s, 202, this.view(m));
+      if (r) {
         await l.terminate().catch(() => {}); this.live.delete(m.id); this.store.remove(m);
-        return this.send(s, 502, { error: `import failed: ${String((e as Error)?.message ?? e)}` });
+        return this.send(s, 502, { error: `import failed: ${String(r?.message ?? r)}` });
       }
       return this.send(s, 201, this.view(m));
     }
