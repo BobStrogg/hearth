@@ -1,6 +1,9 @@
 # Changelog
 
 ## Unreleased
+- Chat: tool-call expanders (diffs, command output, JSON, long paths) and markdown code blocks no longer widen the
+  chat column or add a horizontal scrollbar, which was especially awkward on a phone. Long titles in the collapsed
+  summary are ellipsized; pre, code and diff blocks scroll inside their own box, and paths, URLs and JSON wrap.
 
 ## 0.9.3
 - Terminals on phones and tablets: a one-finger drag now scrolls the terminal (its scrollback in a shell; wheel or
