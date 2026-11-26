@@ -896,10 +896,11 @@ class Chat {
       else if (c.type === "content" && c.content?.type === "text") body.append(h("pre", {}, c.content.text));
       else if (c.type === "terminal") body.append(h("div", { class: "muted" }, `terminal ${c.terminalId}`));
     }
-    if (d.rawInput && !(d.content || []).length) body.append(h("pre", {}, JSON.stringify(d.rawInput, squash, 2).slice(0, 4000)));
+    if (d.rawInput && !(d.content || []).length) body.append(h("pre", { class: "payload" }, JSON.stringify(d.rawInput, squash, 2).slice(0, 4000)));
     if (d.rawOutput) {
       for (const im of findImages(d.rawOutput)) { const f = fig(im); if (f) body.append(f); }
-      body.append(h("pre", {}, (typeof d.rawOutput === "string" ? d.rawOutput : JSON.stringify(d.rawOutput, squash, 2)).slice(0, 4000)));
+      const isStr = typeof d.rawOutput === "string";
+      body.append(h("pre", isStr ? {} : { class: "payload" }, (isStr ? d.rawOutput : JSON.stringify(d.rawOutput, squash, 2)).slice(0, 4000)));
     }
     t.figs = figs;
     t.el.replaceChildren(h("summary", { class: d.status || "" }, ico(icon), ` ${d.title || d.kind || "Tool"}`), body);
